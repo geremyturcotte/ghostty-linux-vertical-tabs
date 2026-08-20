@@ -47,6 +47,13 @@ pub const Sidebar = extern struct {
         /// The tab view we mirror. Borrowed, never owned.
         tab_view: ?*adw.TabView = null,
 
+        /// Handler id for our notify::selected-page connection on the tab
+        /// view. It MUST be disconnected in dispose: zig-gobject's connect
+        /// maps to g_signal_connect_data, not g_signal_connect_object, so
+        /// nothing ties the handler's life to ours. The tab view is borrowed
+        /// and can outlive us, and it would then call back into freed memory.
+        selected_page_handler: c_ulong = 0,
+
         pub var offset: c_int = 0;
     };
 
@@ -60,7 +67,7 @@ pub const Sidebar = extern struct {
         priv.tab_view = tab_view;
         priv.model.setModel(tab_view.getPages().as(gio.ListModel));
 
-        _ = gobject.Object.signals.notify.connect(
+        priv.selected_page_handler = gobject.Object.signals.notify.connect(
             tab_view,
             *Self,
             notifySelectedPage,
@@ -116,6 +123,19 @@ pub const Sidebar = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+
+        // Disconnect before dropping the tab view. Leaving this connected is a
+        // use-after-free: the tab view outlives the sidebar during window
+        // teardown, and would call notifySelectedPage on freed memory.
+        if (priv.tab_view) |tv| {
+            if (priv.selected_page_handler != 0) {
+                gobject.signalHandlerDisconnect(
+                    tv.as(gobject.Object),
+                    priv.selected_page_handler,
+                );
+                priv.selected_page_handler = 0;
+            }
+        }
         priv.tab_view = null;
         gtk.Widget.disposeTemplate(
             self.as(gtk.Widget),

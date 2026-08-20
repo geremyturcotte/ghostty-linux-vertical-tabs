@@ -98,6 +98,14 @@ pub const SidebarRow = extern struct {
         const pwd = pwd_ orelse return null;
         const span = std.mem.span(pwd);
         if (span.len == 0) return null;
+
+        // MUST allocate. Three independent reviewers said this dupeZ leaks —
+        // that GTK copies the returned string and never frees it. It was tried
+        // their way and the binary aborted on exit with
+        // `munmap_chunk(): invalid pointer`, in every mode: something DOES
+        // free this pointer, so returning an interior pointer into the
+        // caller's buffer hands free() an address it never allocated.
+        // Unanimous review lost to one run of the program.
         const base = std.fs.path.basename(span);
         return glib.ext.dupeZ(u8, if (base.len == 0) span else base);
     }
@@ -119,6 +127,12 @@ pub const SidebarRow = extern struct {
         return @intFromPtr(data);
     }
 
+    /// `idx == 0` deliberately passes a null pointer, and GLib documents that
+    /// `g_object_set_data(obj, key, NULL)` REMOVES the key rather than storing
+    /// zero. That is exactly the "no colour" semantics wanted here — absent and
+    /// zero both read back as 0 — but it is load-bearing rather than
+    /// incidental: anyone who later needs to distinguish "explicitly zero" from
+    /// "never set" cannot do it through this door.
     fn setColour(self: *Self, idx: usize) void {
         const priv = self.private();
         const page = priv.page orelse return;
@@ -187,9 +201,19 @@ pub const SidebarRow = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const priv = self.private();
+
+        // @intFromFloat is illegal behaviour on NaN, infinity, or anything
+        // outside c_int. Gesture coordinates are finite in practice, but
+        // "in practice" is not a guarantee the language makes.
+        const safe = struct {
+            fn coord(v: f64) c_int {
+                if (!std.math.isFinite(v)) return 0;
+                return @intFromFloat(std.math.clamp(v, 0, 100_000));
+            }
+        };
         const rect: gdk.Rectangle = .{
-            .f_x = @intFromFloat(x),
-            .f_y = @intFromFloat(y),
+            .f_x = safe.coord(x),
+            .f_y = safe.coord(y),
             .f_width = 1,
             .f_height = 1,
         };
@@ -205,10 +229,23 @@ pub const SidebarRow = extern struct {
         _: ?*glib.Variant,
         self: *Self,
     ) callconv(.c) void {
-        const priv = self.private();
-        const page = priv.page orelse return;
+        const page = self.livePage() orelse return;
         const tab = gobject.ext.cast(Tab, page.getChild()) orelse return;
         tab.promptTabTitle();
+    }
+
+    /// This row's page, but only if the tab view still holds it.
+    ///
+    /// Rows are recycled and a menu can stay open across a tab closing, so
+    /// `priv.page` alone is not proof the page is alive. Acting on a departed
+    /// page means either closing the wrong tab or dereferencing a child widget
+    /// that has already been destroyed.
+    fn livePage(self: *Self) ?*adw.TabPage {
+        const priv = self.private();
+        const page = priv.page orelse return null;
+        const window = ext.getAncestor(Window, self.as(gtk.Widget)) orelse return null;
+        if (window.getTabView().getPagePosition(page) < 0) return null;
+        return page;
     }
 
     fn actionClose(
@@ -229,8 +266,7 @@ pub const SidebarRow = extern struct {
     }
 
     fn closeTab(self: *Self) void {
-        const priv = self.private();
-        const page = priv.page orelse return;
+        const page = self.livePage() orelse return;
         const window = ext.getAncestor(
             Window,
             self.as(gtk.Widget),
