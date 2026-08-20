@@ -1,12 +1,16 @@
 const std = @import("std");
 
 const adw = @import("adw");
+const gdk = @import("gdk");
+const gio = @import("gio");
+const glib = @import("glib");
 const gobject = @import("gobject");
 const gtk = @import("gtk");
 
 const ext = @import("../ext.zig");
 const gresource = @import("../build/gresource.zig");
 const Common = @import("../class.zig").Common;
+const Tab = @import("tab.zig").Tab;
 const Window = @import("window.zig").Window;
 
 const log = std.log.scoped(.gtk_ghostty_sidebar_row);
@@ -54,11 +58,69 @@ pub const SidebarRow = extern struct {
         /// The tab this row stands for. Borrowed from the tab view.
         page: ?*adw.TabPage = null,
 
+        /// Right-click menu. The horizontal tab bar carries one of these
+        /// upstream; hiding that bar took it away, so the sidebar restores it.
+        menu: *gtk.PopoverMenu,
+
+        /// Actions the menu items target, scoped to this row under "row".
+        action_group: ?*gio.SimpleActionGroup = null,
+
         pub var offset: c_int = 0;
     };
 
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
+        self.initActionMap();
+    }
+
+    fn initActionMap(self: *Self) void {
+        const actions = [_]ext.actions.Action(Self){
+            .init("rename", actionRename, null),
+            .init("close", actionClose, null),
+        };
+        self.private().action_group =
+            ext.actions.addAsGroup(Self, self, "row", &actions);
+    }
+
+    /// Open the menu where the pointer is.
+    fn rightClick(
+        _: *gtk.GestureClick,
+        _: c_int,
+        x: f64,
+        y: f64,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        const rect: gdk.Rectangle = .{
+            .f_x = @intFromFloat(x),
+            .f_y = @intFromFloat(y),
+            .f_width = 1,
+            .f_height = 1,
+        };
+        priv.menu.as(gtk.Popover).setPointingTo(&rect);
+        priv.menu.as(gtk.Popover).popup();
+    }
+
+    /// Rename this row's tab, without switching to it. `Tab.promptTabTitle`
+    /// is public, so the row does not have to select the page first and then
+    /// route through a window action.
+    fn actionRename(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        const page = priv.page orelse return;
+        const tab = gobject.ext.cast(Tab, page.getChild()) orelse return;
+        tab.promptTabTitle();
+    }
+
+    fn actionClose(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        self.closeTab();
     }
 
     /// Close this row's tab.
@@ -67,6 +129,10 @@ pub const SidebarRow = extern struct {
     /// injected: a factory template can pass the row its item, but nothing
     /// else from the outer scope.
     fn closeClicked(_: *gtk.Button, self: *Self) callconv(.c) void {
+        self.closeTab();
+    }
+
+    fn closeTab(self: *Self) void {
         const priv = self.private();
         const page = priv.page orelse return;
         const window = ext.getAncestor(
@@ -107,7 +173,9 @@ pub const SidebarRow = extern struct {
                 }),
             );
 
+            class.bindTemplateChildPrivate("menu", .{});
             class.bindTemplateCallback("close_clicked", &closeClicked);
+            class.bindTemplateCallback("right_click", &rightClick);
 
             gobject.ext.registerProperties(class, &.{
                 properties.page.impl,
@@ -117,6 +185,7 @@ pub const SidebarRow = extern struct {
         }
 
         pub const as = C.Class.as;
+        pub const bindTemplateChildPrivate = C.Class.bindTemplateChildPrivate;
         pub const bindTemplateCallback = C.Class.bindTemplateCallback;
     };
 };

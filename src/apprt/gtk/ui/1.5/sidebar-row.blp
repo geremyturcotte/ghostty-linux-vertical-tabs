@@ -20,6 +20,17 @@ template $GhosttySidebarRow: Adw.Bin {
       visible: bind template.page as <Adw.TabPage>.needs-attention;
     }
 
+    Gtk.GestureClick {
+      button: 3;
+      pressed => $right_click();
+    }
+
+    Gtk.PopoverMenu menu {
+      menu-model: row_menu;
+      has-arrow: false;
+      halign: start;
+    }
+
     Gtk.Button {
       icon-name: "window-close-symbolic";
       tooltip-text: _("Close Tab");
@@ -34,5 +45,17 @@ template $GhosttySidebarRow: Adw.Bin {
         "circular",
       ]
     }
+  }
+}
+
+menu row_menu {
+  item {
+    label: _("Change Tab Title…");
+    action: "row.rename";
+  }
+
+  item {
+    label: _("Close Tab");
+    action: "row.close";
   }
 }
