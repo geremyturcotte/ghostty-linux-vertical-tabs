@@ -9,7 +9,10 @@ list in a collapsible **vertical sidebar** on the GTK/libadwaita backend.
 > on 2026-03-13 — *"the short term answer is no"* — and the thread is locked.
 > Forks are the path upstream explicitly points to. This is one.
 
-<!-- SCREENSHOT: drop a PNG or GIF of the sidebar here. -->
+![The sidebar: four named tabs, each with a colour mark and its working directory](docs/sidebar.png)
+
+*Tabs renamed by hand, marked with colours, each showing the last segment of its
+working directory. The horizontal tab bar is gone — the two are alternatives.*
 
 ## Why this exists
 
