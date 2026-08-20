@@ -1,0 +1,38 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $GhosttySidebarRow: Adw.Bin {
+  Gtk.Box {
+    orientation: horizontal;
+    spacing: 6;
+    tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
+
+    Gtk.Label {
+      ellipsize: end;
+      halign: start;
+      hexpand: true;
+      single-line-mode: true;
+      label: bind template.page as <Adw.TabPage>.title;
+    }
+
+    Gtk.Image {
+      icon-name: "radio-symbolic";
+      visible: bind template.page as <Adw.TabPage>.needs-attention;
+    }
+
+    Gtk.Button {
+      icon-name: "window-close-symbolic";
+      tooltip-text: _("Close Tab");
+      valign: center;
+      clicked => $close_clicked();
+      // Never in the terminal's focus chain.
+      can-focus: false;
+      focus-on-click: false;
+
+      styles [
+        "flat",
+        "circular",
+      ]
+    }
+  }
+}

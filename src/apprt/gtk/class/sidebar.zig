@@ -8,6 +8,7 @@ const gtk = @import("gtk");
 const gresource = @import("../build/gresource.zig");
 const Common = @import("../class.zig").Common;
 const Tab = @import("tab.zig").Tab;
+const SidebarRow = @import("sidebar_row.zig").SidebarRow;
 
 const log = std.log.scoped(.gtk_ghostty_sidebar);
 
@@ -138,6 +139,7 @@ pub const Sidebar = extern struct {
         pub const Instance = Self;
 
         fn init(class: *Class) callconv(.c) void {
+            gobject.ext.ensureType(SidebarRow);
             gtk.Widget.Class.setTemplateFromResource(
                 class.as(gtk.Widget.Class),
                 comptime gresource.blueprint(.{

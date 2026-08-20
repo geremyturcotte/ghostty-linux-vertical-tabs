@@ -55,6 +55,7 @@ pub const blueprints: []const Blueprint = &.{
     .{ .major = 1, .minor = 5, .name = "window" },
     .{ .major = 1, .minor = 5, .name = "command-palette" },
     .{ .major = 1, .minor = 5, .name = "sidebar" },
+    .{ .major = 1, .minor = 5, .name = "sidebar-row" },
 };
 
 /// CSS files in css_path

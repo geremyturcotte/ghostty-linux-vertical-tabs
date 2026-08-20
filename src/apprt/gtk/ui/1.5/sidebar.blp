@@ -27,23 +27,8 @@ template $GhosttySidebar: Adw.Bin {
 
       factory: Gtk.BuilderListItemFactory {
         template Gtk.ListItem {
-          child: Gtk.Box {
-            orientation: horizontal;
-            spacing: 6;
-            tooltip-text: bind template.item as <Adw.TabPage>.tooltip;
-
-            Gtk.Label {
-              ellipsize: end;
-              halign: start;
-              hexpand: true;
-              single-line-mode: true;
-              label: bind template.item as <Adw.TabPage>.title;
-            }
-
-            Gtk.Image {
-              icon-name: "radio-symbolic";
-              visible: bind template.item as <Adw.TabPage>.needs-attention;
-            }
+          child: $GhosttySidebarRow {
+            page: bind template.item as <Adw.TabPage>;
           };
         }
       };

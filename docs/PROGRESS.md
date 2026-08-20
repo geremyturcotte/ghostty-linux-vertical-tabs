@@ -10,9 +10,9 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 2 | `gtk-sidebar-tabs` config key | ✅ done |
 | 3 | `GhosttySidebar` widget, standalone | ✅ done |
 | 4 | Wire into the window, with focus | ✅ done, verified on screen |
-| 5 | Toggle: action, keybind, header button | 🟡 built, shortcut untested |
-| 6 | Per-row close button | ⬜ |
-| 7 | Adaptive collapse + acceptance checklist | ⬜ |
+| 5 | Toggle: action, keybind, header button | ✅ done, verified on screen |
+| 6 | Per-row close button | 🟡 built, needs a click |
+| 7 | Adaptive collapse + acceptance checklist | ⬜ next |
 | 8 | README, GIF, tagged release | ⬜ |
 
 ## What works right now
@@ -46,8 +46,10 @@ fix it.
 | Can Blueprint cast to a libadwaita type? `bind template.item as <Adw.TabPage>.title` was the first such cast in this repo. | **Resolved.** The generated `sidebar.ui` emits the canonical nested lookup against `AdwTabPage`. |
 | Does Ghostty build on Ubuntu 24.04 at all? | **Resolved.** See the plan's Task 0 for the recipe and its five deviations. |
 
-Still open, each with a named task: the close-button mechanism (Task 6), and
-arrow-key behaviour through the sidebar (Task 7's checklist).
+| Does `action-target: bind template.position` work? | **Refuted.** It compiles and then dies at runtime — GObject has no `guint`-to-`GVariant` transform. Replaced by a row widget that owns its page. |
+| Does a fixed GTK accelerator fire while the terminal holds focus? | **Resolved.** `Ctrl+Shift+B` works; the six-file `Binding.zig` route is not needed. |
+
+Still open: arrow-key behaviour through the sidebar (Task 7's checklist).
 
 ## Things that were wrong and got corrected
 

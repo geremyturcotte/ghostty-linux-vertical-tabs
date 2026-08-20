@@ -369,6 +369,8 @@ pub const Window = extern struct {
     fn initActionMap(self: *Self) void {
         const s_variant_type = glib.ext.VariantType.newFor([:0]const u8);
         defer s_variant_type.free();
+        const u_variant_type = glib.ext.VariantType.newFor(u32);
+        defer u_variant_type.free();
 
         const actions = [_]ext.actions.Action(Self){
             .init("about", actionAbout, null),
@@ -379,6 +381,7 @@ pub const Window = extern struct {
             .init("prompt-surface-title", actionPromptSurfaceTitle, null),
             .init("prompt-tab-title", actionPromptTabTitle, null),
             .init("prompt-context-tab-title", actionPromptContextTabTitle, null),
+            .init("close-tab-at", actionCloseTabAt, u_variant_type),
             .init("toggle-sidebar", actionToggleSidebar, null),
             .init("ring-bell", actionRingBell, null),
             .init("split-right", actionSplitRight, null),
@@ -1839,6 +1842,30 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         self.as(gtk.Window).close();
+    }
+
+    /// Close the tab at a given row index.
+    ///
+    /// Deliberately NOT named `win.close-tab`: that already exists, takes a
+    /// string variant, and parses it into a CloseTabMode (this/other/right)
+    /// acting on the context-menu page. Reusing the name with a uint32 would
+    /// be a signature collision.
+    fn actionCloseTabAt(
+        _: *gio.SimpleAction,
+        param_: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const param = param_ orelse {
+            log.warn("win.close-tab-at called without a parameter", .{});
+            return;
+        };
+        const pos = param.getUint32();
+        const priv = self.private();
+        if (pos >= @as(u32, @intCast(priv.tab_view.getNPages()))) {
+            log.warn("win.close-tab-at out of range pos={d}", .{pos});
+            return;
+        }
+        priv.tab_view.closePage(priv.tab_view.getNthPage(@intCast(pos)));
     }
 
     fn actionToggleSidebar(
