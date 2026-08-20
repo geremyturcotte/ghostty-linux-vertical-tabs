@@ -1,203 +1,169 @@
-<!-- LOGO -->
-<h1>
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/fe853809-ba8b-400b-83ab-a9a0da25be8a" alt="Logo" width="128">
-  <br>Ghostty
-</h1>
-  <p align="center">
-    Fast, native, feature-rich terminal emulator pushing modern features.
-    <br />
-    <a href="#about">About</a>
-    ·
-    <a href="https://ghostty.org/download">Download</a>
-    ·
-    <a href="https://ghostty.org/docs">Documentation</a>
-    ·
-    <a href="CONTRIBUTING.md">Contributing</a>
-    ·
-    <a href="HACKING.md">Developing</a>
-  </p>
-</p>
+# Ghostty with vertical tabs, on Linux
 
-## About
+A fork of [Ghostty](https://github.com/ghostty-org/ghostty) that puts the tab
+list in a collapsible **vertical sidebar** on the GTK/libadwaita backend.
 
-Ghostty is a terminal emulator that differentiates itself by being
-fast, feature-rich, and native. While there are many excellent terminal
-emulators available, they all force you to choose between speed,
-features, or native UIs. Ghostty provides all three.
+> **This will not arrive in upstream Ghostty.** The request was answered and
+> closed by Mitchell Hashimoto in
+> [Discussion #2549](https://github.com/ghostty-org/ghostty/discussions/2549)
+> on 2026-03-13 — *"the short term answer is no"* — and the thread is locked.
+> Forks are the path upstream explicitly points to. This is one.
 
-In all categories, I am not trying to claim that Ghostty is the
-best (i.e. the fastest, most feature-rich, or most native). But
-Ghostty is competitive in all three categories and Ghostty
-doesn't make you choose between them.
+<!-- SCREENSHOT: drop a PNG or GIF of the sidebar here. -->
 
-Ghostty also intends to push the boundaries of what is possible with a
-terminal emulator by exposing modern, opt-in features that enable CLI tool
-developers to build more feature rich, interactive applications.
+## Why this exists
 
-While aiming for this ambitious goal, our first step is to make Ghostty
-one of the best fully standards compliant terminal emulator, remaining
-compatible with all existing shells and software while supporting all of
-the latest terminal innovations in the ecosystem. You can use Ghostty
-as a drop-in replacement for your existing terminal emulator.
+`gtk-tabs-location` used to accept `left` and `right`. libadwaita became
+mandatory in Ghostty 1.2.0, and its `AdwTabBar` is horizontal by GNOME HIG
+design, so those values were dropped. On 1.3.1 the validator is blunt about it:
 
-For more details, see [About Ghostty](https://ghostty.org/docs/about).
-
-## Download
-
-See the [download page](https://ghostty.org/download) on the Ghostty website.
-
-## Documentation
-
-See the [documentation](https://ghostty.org/docs) on the Ghostty website.
-
-## Contributing and Developing
-
-If you have any ideas, issues, etc. regarding Ghostty, or would like to
-contribute to Ghostty through pull requests, please check out our
-["Contributing to Ghostty"](CONTRIBUTING.md) document. Those who would like
-to get involved with Ghostty's development as well should also read the
-["Developing Ghostty"](HACKING.md) document for more technical details.
-
-## Roadmap and Status
-
-The high-level ambitious plan for the project, in order:
-
-|  #  | Step                                                      | Status |
-| :-: | --------------------------------------------------------- | :----: |
-|  1  | Standards-compliant terminal emulation                    |   ✅   |
-|  2  | Competitive performance                                   |   ✅   |
-|  3  | Basic customizability -- fonts, bg colors, etc.           |   ✅   |
-|  4  | Richer windowing features -- multi-window, tabbing, panes |   ✅   |
-|  5  | Native Platform Experiences (i.e. Mac Preference Panel)   |   ⚠️   |
-|  6  | Cross-platform `libghostty` for Embeddable Terminals      |   ⚠️   |
-|  7  | Windows Terminals (including PowerShell, Cmd, WSL)        |   ❌   |
-|  N  | Fancy features (to be expanded upon later)                |   ❌   |
-
-Additional details for each step in the big roadmap below:
-
-#### Standards-Compliant Terminal Emulation
-
-Ghostty implements enough control sequences to be used by hundreds of
-testers daily for over the past year. Further, we've done a
-[comprehensive xterm audit](https://github.com/ghostty-org/ghostty/issues/632)
-comparing Ghostty's behavior to xterm and building a set of conformance
-test cases.
-
-We believe Ghostty is one of the most compliant terminal emulators available.
-
-Terminal behavior is partially a de jure standard
-(i.e. [ECMA-48](https://ecma-international.org/publications-and-standards/standards/ecma-48/))
-but mostly a de facto standard as defined by popular terminal emulators
-worldwide. Ghostty takes the approach that our behavior is defined by
-(1) standards, if available, (2) xterm, if the feature exists, (3)
-other popular terminals, in that order. This defines what the Ghostty project
-views as a "standard."
-
-#### Competitive Performance
-
-We need better benchmarks to continuously verify this, but Ghostty is
-generally in the same performance category as the other highest performing
-terminal emulators.
-
-For rendering, we have a multi-renderer architecture that uses OpenGL on
-Linux and Metal on macOS. As far as I'm aware, we're the only terminal
-emulator other than iTerm that uses Metal directly. And we're the only
-terminal emulator that has a Metal renderer that supports ligatures (iTerm
-uses a CPU renderer if ligatures are enabled). We can maintain around 60fps
-under heavy load and much more generally -- though the terminal is
-usually rendering much lower due to little screen changes.
-
-For IO, we have a dedicated IO thread that maintains very little jitter
-under heavy IO load (i.e. `cat <big file>.txt`). On benchmarks for IO,
-we're usually within a small margin of other fast terminal emulators.
-For example, reading a dump of plain text is 4x faster compared to iTerm and
-Kitty, and 2x faster than Terminal.app. Alacritty is very fast but we're still
-around the same speed (give or take) and our app experience is much more
-feature rich.
-
-> [!NOTE]
-> Despite being _very fast_, there is a lot of room for improvement here.
-
-#### Richer Windowing Features
-
-The Mac and Linux (build with GTK) apps support multi-window, tabbing, and
-splits.
-
-#### Native Platform Experiences
-
-Ghostty is a cross-platform terminal emulator but we don't aim for a
-least-common-denominator experience. There is a large, shared core written
-in Zig but we do a lot of platform-native things:
-
-- The macOS app is a true SwiftUI-based application with all the things you
-  would expect such as real windowing, menu bars, a settings GUI, etc.
-- macOS uses a true Metal renderer with CoreText for font discovery.
-- The Linux app is built with GTK.
-
-There are more improvements to be made. The macOS settings window is still
-a work-in-progress. Similar improvements will follow with Linux.
-
-#### Cross-platform `libghostty` for Embeddable Terminals
-
-In addition to being a standalone terminal emulator, Ghostty is a
-C-compatible library for embedding a fast, feature-rich terminal emulator
-in any 3rd party project. This library is called `libghostty`.
-
-Due to the scope of this project, we're breaking libghostty down into
-separate actually libraries, starting with `libghostty-vt`. The goal of
-this project is to focus on parsing terminal sequences and maintaining
-terminal state. This is covered in more detail in this
-[blog post](https://mitchellh.com/writing/libghostty-is-coming).
-
-`libghostty-vt` is already available and usable today for Zig and C and
-is compatible for macOS, Linux, Windows, and WebAssembly. At the time of
-writing this, the API isn't stable yet and we haven't tagged an official
-release, but the core logic is well proven (since Ghostty uses it) and
-we're working hard on it now.
-
-The ultimate goal is not hypothetical! The macOS app is a `libghostty` consumer.
-The macOS app is a native Swift app developed in Xcode and `main()` is
-within Swift. The Swift app links to `libghostty` and uses the C API to
-render terminals.
-
-## Crash Reports
-
-Ghostty has a built-in crash reporter that will generate and save crash
-reports to disk. The crash reports are saved to the `$XDG_STATE_HOME/ghostty/crash`
-directory. If `$XDG_STATE_HOME` is not set, the default is `~/.local/state`.
-**Crash reports are _not_ automatically sent anywhere off your machine.**
-
-Crash reports are only generated the next time Ghostty is started after a
-crash. If Ghostty crashes and you want to generate a crash report, you must
-restart Ghostty at least once. You should see a message in the log that a
-crash report was generated.
-
-> [!NOTE]
->
-> Use the `ghostty +crash-report` CLI command to get a list of available crash
-> reports. A future version of Ghostty will make the contents of the crash
-> reports more easily viewable through the CLI and GUI.
-
-Crash reports end in the `.ghosttycrash` extension. The crash reports are in
-[Sentry envelope format](https://develop.sentry.dev/sdk/envelopes/). You can
-upload these to your own Sentry account to view their contents, but the format
-is also publicly documented so any other available tools can also be used.
-The `ghostty +crash-report` CLI command can be used to list any crash reports.
-A future version of Ghostty will show you the contents of the crash report
-directly in the terminal.
-
-To send the crash report to the Ghostty project, you can use the following
-CLI command using the [Sentry CLI](https://docs.sentry.io/cli/installation/):
-
-```shell-session
-SENTRY_DSN=https://e914ee84fd895c4fe324afa3e53dac76@o4507352570920960.ingest.us.sentry.io/4507850923638784 sentry-cli send-envelope --raw <path to ghostty crash>
+```
+$ ghostty +validate-config --config-file=/tmp/t.conf
+gtk-tabs-location: invalid value "left", valid values are: top, bottom
 ```
 
-> [!WARNING]
->
-> The crash report can contain sensitive information. The report doesn't
-> purposely contain sensitive information, but it does contain the full
-> stack memory of each thread at the time of the crash. This information
-> is used to rebuild the stack trace but can also contain sensitive data
-> depending on when the crash occurred.
+Two sidebar forks already existed when this one started —
+[`tomreinert/ghostty`](https://github.com/tomreinert/ghostty) ("Sidegeist") and
+[`manaflow-ai/cmux`](https://github.com/manaflow-ai/cmux) — and **both are macOS
+only**. Neither touches anything outside `macos/Sources/`. The GTK backend had
+nothing. That is the gap this fills.
+
+## What it does
+
+- A vertical sidebar listing the window's tabs, on the left or the right.
+- Live tab titles and tooltips, plus the bell indicator for background tabs.
+- Click a row to switch; a close button on each row.
+- Toggle with the titlebar button or `Ctrl+Shift+B`.
+- Collapses to an overlay on narrow windows instead of eating terminal columns.
+- `gtk-sidebar-tabs = none` turns the whole thing off and leaves Ghostty exactly
+  as upstream ships it.
+
+### Configuration
+
+```ini
+# ~/.config/ghostty/config
+gtk-sidebar-tabs = left     # none | left | right   (default: left)
+```
+
+While the sidebar is shown the horizontal tab bar is hidden, regardless of
+`window-show-tab-bar` — they are alternatives, never both at once.
+
+`Ctrl+Shift+B` is a fixed accelerator, **not** configurable through
+`keybind =`. Making it configurable would mean adding an action to Ghostty's
+input layer and threading it through four more core files; the reasoning is in
+[the design doc](docs/vertical-tabs-design.md).
+
+### Not here yet
+
+Panes as a second level under each tab, renameable in place. Deferred
+deliberately: panes live in `GhosttySplitTree`, not in `AdwTabPages`, so it
+needs a data model of its own rather than a tweak.
+
+Splitting and renaming already work without it — `Ctrl+Shift+O` and
+`Ctrl+Shift+E` split, and the `prompt_surface_title` / `prompt_tab_title`
+actions rename a pane or a tab. Those two ship with no default keybind, so give
+them one:
+
+```ini
+keybind = ctrl+shift+r=prompt_surface_title
+keybind = ctrl+shift+comma=prompt_tab_title
+```
+
+## Building
+
+There are no packages yet; build from source.
+
+Ghostty pins an **exact** Zig minor version, and `v1.3.1` wants **0.15.2** —
+`requireZig()` rejects a newer Zig just as hard as an older one, so 0.16.0 does
+not work here. Ubuntu's `blueprint-compiler` is 0.12.0 where Ghostty needs
+≥ 0.16, so that is built from source too. Everything except the apt line
+installs under `~/.local`.
+
+```bash
+# system packages — the only step needing root
+sudo apt install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1
+
+# Zig 0.15.2 (note the arch/OS order in the tarball name)
+mkdir -p ~/.local/bin ~/.local/opt && cd /tmp
+curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+tar xf zig.tar.xz && mv zig-x86_64-linux-0.15.2 ~/.local/opt/zig-0.15.2
+ln -sf ~/.local/opt/zig-0.15.2/zig ~/.local/bin/zig
+
+# meson + ninja. PEP 668 refuses pip --user on 24.04; a venv costs one line
+# and does not put the system Python at risk.
+python3 -m venv ~/.local/opt/build-venv
+~/.local/opt/build-venv/bin/pip install --upgrade pip meson ninja
+ln -sf ~/.local/opt/build-venv/bin/meson ~/.local/bin/meson
+ln -sf ~/.local/opt/build-venv/bin/ninja ~/.local/bin/ninja
+
+# blueprint-compiler 0.22.2
+cd /tmp && git clone --depth 1 --branch v0.22.2 \
+  https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+cd blueprint-compiler && meson setup _build --prefix="$HOME/.local"
+ninja -C _build install
+# meson installs the module where Python 3.12 does not look for it
+echo "$HOME/.local/lib/python3/dist-packages" \
+  > "$(python3 -m site --user-site)/blueprintcompiler.pth"
+
+# build
+export PATH="$HOME/.local/bin:$PATH"
+git clone https://github.com/geremyturcotte/ghostty-linux-vertical-tabs.git
+cd ghostty-linux-vertical-tabs && git checkout sidebar
+zig build --search-prefix "$HOME/.local"
+./zig-out/bin/ghostty --gtk-sidebar-tabs=left
+```
+
+**If the link fails on `gtk4-layer-shell-0`:** Ghostty requires it
+unconditionally, no distro package provides it on Ubuntu 24.04, and the `.so`
+that does exist is named without the `-0`. Point the expected name at it:
+
+```bash
+mkdir -p ~/.local/lib
+ln -sf /usr/lib/libgtk4-layer-shell.so ~/.local/lib/libgtk4-layer-shell-0.so
+```
+
+## How it is built
+
+`main` mirrors the upstream tag verbatim and is never modified. The feature
+lives on `sidebar` as a small series rebased onto each upstream release — never
+merged — so the patch stays a diff a stranger can read end to end.
+
+The logic lives in files that are entirely new (`class/sidebar.zig`,
+`class/sidebar_row.zig` and their blueprints). Upstream files receive insertion
+points only, never rewrites. That shape is the whole maintenance strategy:
+upstream cannot conflict with a file that exists only here, so conflicts are
+limited to the handful of lines actually inserted.
+
+- [Design](docs/vertical-tabs-design.md) — architecture, the rejected
+  alternatives, and the risks; including what four rounds of adversarial review
+  changed, and where the review itself turned out to be wrong.
+- [Plan](docs/vertical-tabs-plan.md) — the implementation plan, and the five
+  places it did not survive contact with the machine.
+- [Progress](docs/PROGRESS.md) — current state.
+- [Acceptance](docs/acceptance.md) — the manual checklist that stands in for
+  unit tests, because a GTK widget does not submit to them.
+
+## License and attribution
+
+MIT, the same as upstream. Ghostty is by Mitchell Hashimoto and its
+contributors; its copyright and license are preserved unchanged, and the
+upstream README, [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+[`HACKING.md`](HACKING.md) remain in git history and at
+[ghostty.org](https://ghostty.org). This fork claims only the sidebar.
+
+No pull request will be opened against `ghostty-org/ghostty` — the discussion is
+closed and locked, and sending one anyway would only cost a maintainer time.
+
+## AI disclosure
+
+Upstream's [`AI_POLICY.md`](AI_POLICY.md) requires that AI use be disclosed.
+This fork does not contribute upstream, so it is not bound by that policy. The
+disclosure is made anyway: the audience here is the Ghostty community, and the
+norm is a good one.
+
+This work was done with Claude Code (Opus 5), with the repository owner in the
+loop. Load-bearing claims were verified against primary sources rather than
+model memory; the architecture went through four rounds of adversarial
+multi-model review before implementation; and corrections are recorded in place
+rather than quietly replaced — including the ones that proved the review wrong.
+See [§9 of the design doc](docs/vertical-tabs-design.md).
