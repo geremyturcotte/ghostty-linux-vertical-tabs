@@ -31,12 +31,19 @@ nothing. That is the gap this fills.
 ## What it does
 
 - A vertical sidebar listing the window's tabs, on the left or the right.
-- Live tab titles and tooltips, plus the bell indicator for background tabs.
-- Click a row to switch; a close button on each row.
+- Live tab titles, with the working directory underneath — the last segment
+  only, because `~/Github/prokai-plugins` ellipsizes into noise in a narrow
+  column while `prokai-plugins` is what tells two tabs apart.
+- The bell indicator for background tabs, and a close button on each row.
+- Right-click a row to rename it, colour it, or close it. Renaming does **not**
+  switch tabs first, so you can rename tab 3 while looking at tab 1.
+- Five colour marks to group tabs by hand. They are Adwaita's semantic classes,
+  so they follow your light/dark theme instead of being painted on.
 - Toggle with the titlebar button or `Ctrl+Shift+B`.
 - Collapses to an overlay on narrow windows instead of eating terminal columns.
 - `gtk-sidebar-tabs = none` turns the whole thing off and leaves Ghostty exactly
-  as upstream ships it.
+  as upstream ships it — asserted by `scripts/check-none-parity.sh`, because
+  that promise has been broken twice and only a human reading a log caught it.
 
 ### Configuration
 
@@ -59,10 +66,9 @@ Panes as a second level under each tab, renameable in place. Deferred
 deliberately: panes live in `GhosttySplitTree`, not in `AdwTabPages`, so it
 needs a data model of its own rather than a tweak.
 
-Splitting and renaming already work without it — `Ctrl+Shift+O` and
-`Ctrl+Shift+E` split, and the `prompt_surface_title` / `prompt_tab_title`
-actions rename a pane or a tab. Those two ship with no default keybind, so give
-them one:
+Splitting already works without it: `Ctrl+Shift+O` and `Ctrl+Shift+E`. Renaming
+a *tab* is on the sidebar's right-click menu. To rename an individual **pane**,
+or to rename from the keyboard, bind the two actions Ghostty ships unbound:
 
 ```ini
 keybind = ctrl+shift+r=prompt_surface_title
@@ -81,7 +87,8 @@ installs under `~/.local`.
 
 ```bash
 # system packages — the only step needing root
-sudo apt install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1
+sudo apt install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev \
+  gir1.2-adw-1 python3-venv
 
 # Zig 0.15.2 (note the arch/OS order in the tarball name)
 mkdir -p ~/.local/bin ~/.local/opt && cd /tmp
@@ -105,13 +112,21 @@ ninja -C _build install
 echo "$HOME/.local/lib/python3/dist-packages" \
   > "$(python3 -m site --user-site)/blueprintcompiler.pth"
 
-# build
+# put ~/.local/bin on PATH for good: `zig build` invokes blueprint-compiler by
+# name, so a fresh terminal without this fails with "not found"
+grep -q '.local/bin' ~/.profile || \
+  echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.profile
 export PATH="$HOME/.local/bin:$PATH"
 git clone https://github.com/geremyturcotte/ghostty-linux-vertical-tabs.git
 cd ghostty-linux-vertical-tabs && git checkout sidebar
-zig build --search-prefix "$HOME/.local"
+zig build -Doptimize=ReleaseFast --search-prefix "$HOME/.local"
 ./zig-out/bin/ghostty --gtk-sidebar-tabs=left
 ```
+
+`-Doptimize=ReleaseFast` matters. Zig defaults to a debug build, which for
+Ghostty is roughly five times larger and announces *"Performance will be very
+poor"* on every launch — a bad way to judge a terminal. Drop the flag only if
+you are working on the code and want the assertions.
 
 **If the link fails on `gtk4-layer-shell-0`:** Ghostty requires it
 unconditionally, no distro package provides it on Ubuntu 24.04, and the `.so`
