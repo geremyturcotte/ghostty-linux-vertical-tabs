@@ -179,7 +179,7 @@ target must be a `GVariant`, so an `AdwTabPage` cannot be an action target. The
 row index is the natural substitute. Two things complicate it.
 
 **The obvious action name is taken.** `win.close-tab` already exists —
-registered at `window.zig:359` with `s_variant_type` and parsed by
+registered in `window.zig` (v1.3.1: 359) with `s_variant_type` and parsed by
 `actionCloseTab` into a `CloseTabMode` enum (`this`/`other`/`right`) operating on
 the context-menu page. A `uint32` action under that name would collide with an
 incompatible signature. The new action is therefore **`win.close-tab-at`**,
@@ -220,7 +220,7 @@ both the `ctrl+shift+*` convention and the VS Code muscle memory.
 
 **Tab bar.** Sidebar active ⇒ `tab_bar` hidden regardless of
 `window-show-tab-bar`. Sidebar `none` ⇒ upstream behavior untouched. This hooks
-into `syncAppearance()` (`window.zig:681`) as a **single call** into
+into `syncAppearance()` (`window.zig`, v1.3.1: 621) as a **single call** into
 `sidebar.zig`, never an inline block — a one-line rebase conflict is trivial to
 resolve, a block is not.
 
@@ -299,11 +299,11 @@ defensible:
 
 ### P0 — sidebar clicks steal keyboard focus
 
-`tabViewSelectedPage` (`window.zig:1671-1693`) does **not** call `grabFocus`; the
-only two calls in the file are at lines 1567 and 1889, on other paths. Selecting
-a page therefore does not return the keyboard to the terminal surface.
+`tabViewSelectedPage()` in `window.zig` (v1.3.1: 1461-1483) does **not** call
+`grabFocus`; the only two calls in the file are elsewhere (v1.3.1: 1357, 1679).
+Selecting a page therefore does not return the keyboard to the terminal surface.
 
-Clicking a sidebar row gives focus to the `GtkListBoxRow`. Without an explicit
+Clicking a sidebar row gives focus to the `GtkListItem` widget. Without an explicit
 `grabFocus()` on the active surface, the terminal silently stops receiving
 keystrokes after every sidebar-driven tab switch — intermittently, and
 dependent on focus state, so it is miserable to reproduce after the fact.
@@ -320,19 +320,25 @@ a widget that just disappeared.
 
 ### Verified facts the design leans on
 
+Citations name the symbol first and the line second, because line numbers move on
+every rebase and symbol names do not. Lines are given for **v1.3.1**, the tag this
+branch is based on — where `window.zig` is 2126 lines. An earlier revision cited
+upstream `main` (2346 lines) by mistake, putting every pointer ~200 lines off.
+
+
 | Claim | Evidence |
 |---|---|
-| `page.title` and `page.tooltip` update live | `window.zig:508-519` binds both from `GhosttyTab` with `.sync_create = true` |
-| `needs-attention` is usable | `window.zig:1692` clears it on tab selection |
-| **No** per-page icon exists | the only `setIconName` is `window.zig:343`, on the window itself |
-| `syncAppearance` re-parents the tab bar | `window.zig:757` `toolbar.remove(tab_bar)`, `:759` `addTopBar` |
+| `page.title` and `page.tooltip` update live | `newTabPage()` binds both from `GhosttyTab` with `.sync_create = true` (v1.3.1: 471-482) |
+| `needs-attention` is usable | `tabViewSelectedPage()` clears it on tab selection (v1.3.1: 1482) |
+| **No** per-page icon exists | the only `setIconName` targets the window itself (v1.3.1: 323) |
+| `syncAppearance()` re-parents the tab bar | `toolbar.remove(tab_bar)` then `addTopBar` (v1.3.1: 697, 699) |
 | `ctrl+shift+b` is unbound | absent from `ghostty +show-config --default` |
 
 ### Deliberately out of scope
 
 Switching tabs through `AdwTabOverview` leaves focus on the tab-view chrome
 rather than the terminal surface, because `tabViewSelectedPage`
-(`window.zig:1671-1693`) never calls `grabFocus`. This is **pre-existing upstream
+(`window.zig`, v1.3.1: 1461-1483) never calls `grabFocus`. This is **pre-existing upstream
 behavior**, not something the sidebar introduces, and fixing it would widen the
 diff into code this fork has no reason to own. Recorded so a future reader does
 not mistake it for a sidebar regression.
