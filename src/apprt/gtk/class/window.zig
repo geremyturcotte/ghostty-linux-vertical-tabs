@@ -26,6 +26,7 @@ const CloseConfirmationDialog = @import("close_confirmation_dialog.zig").CloseCo
 const SplitTree = @import("split_tree.zig").SplitTree;
 const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
+const Sidebar = @import("sidebar.zig").Sidebar;
 const DebugWarning = @import("debug_warning.zig").DebugWarning;
 const CommandPalette = @import("command_palette.zig").CommandPalette;
 const WeakRef = @import("../weak_ref.zig").WeakRef;
@@ -2057,6 +2058,7 @@ pub const Window = extern struct {
         pub const Instance = Self;
 
         fn init(class: *Class) callconv(.c) void {
+            gobject.ext.ensureType(Sidebar);
             gobject.ext.ensureType(DebugWarning);
             gobject.ext.ensureType(SplitTree);
             gobject.ext.ensureType(Surface);

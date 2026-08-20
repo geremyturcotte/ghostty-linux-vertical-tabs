@@ -1,0 +1,44 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $GhosttySidebar: Adw.Bin {
+  Gtk.ScrolledWindow {
+    hscrollbar-policy: never;
+    vexpand: true;
+
+    Gtk.ListView view {
+      show-separators: false;
+      single-click-activate: true;
+      activate => $row_activated();
+
+      model: Gtk.SingleSelection model {};
+
+      styles [
+        "navigation-sidebar",
+      ]
+
+      factory: Gtk.BuilderListItemFactory {
+        template Gtk.ListItem {
+          child: Gtk.Box {
+            orientation: horizontal;
+            spacing: 6;
+            tooltip-text: bind template.item as <Adw.TabPage>.tooltip;
+
+            Gtk.Label {
+              ellipsize: end;
+              halign: start;
+              hexpand: true;
+              single-line-mode: true;
+              label: bind template.item as <Adw.TabPage>.title;
+            }
+
+            Gtk.Image {
+              icon-name: "radio-symbolic";
+              visible: bind template.item as <Adw.TabPage>.needs-attention;
+            }
+          };
+        }
+      };
+    }
+  }
+}
