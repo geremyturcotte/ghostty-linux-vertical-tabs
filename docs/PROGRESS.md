@@ -12,11 +12,12 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 4 | Wire into the window, with focus | ✅ done, verified on screen |
 | 5 | Toggle: action, keybind, header button | ✅ done, verified on screen |
 | 6 | Per-row close button | ✅ done, verified on screen |
-| 7 | Adaptive collapse + acceptance checklist | 🟡 built, checklist to run |
+| 7 | Adaptive collapse + acceptance checklist | ✅ done |
 | 8 | README, GIF, tagged release | 🟡 README done; screenshot + tag left |
-| 9 | Right-click menu on rows | 🟡 built, needs a right-click |
-| 10 | Working-directory subtitle | 🟡 built, needs eyes |
-| 11 | Per-tab colour marks | 🟡 built, needs eyes |
+| 9 | Right-click menu on rows | ✅ done, verified on screen |
+| 10 | Working-directory subtitle | ✅ done, verified on screen |
+| 11 | Per-tab colour marks | ✅ done, verified on screen |
+| 12 | `none`-parity regression guard | ✅ done |
 
 ## What works right now
 
@@ -76,6 +77,11 @@ reading it later.
   code, and nothing imported `sidebar.zig` — a deliberately injected syntax
   error left the build green. Fixed by making it reachable, then re-verified the
   same way.
+- **`AdwBreakpoint` needs a window minimum size, and that broke `none` too.**
+  Declared in the template, it warned on every launch — including with the
+  sidebar off. Second break of the same promise, found the same way: a human
+  reading a log. The breakpoint is now installed from Zig only when the sidebar
+  is enabled, and `scripts/check-none-parity.sh` turns the promise into a test.
 - **`GtkSingleSelection` autoselects by default, and that broke `none`.** On an
   empty model it forces a selection of item 0, which reaches through
   `AdwTabPages` into `adw_tab_view_get_nth_page(0)` on a tab view with no pages

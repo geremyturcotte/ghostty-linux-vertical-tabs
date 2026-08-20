@@ -267,6 +267,12 @@ pub const Window = extern struct {
         /// The collapsible split holding the vertical tab sidebar, and the
         /// sidebar itself. Both are inert while gtk-sidebar-tabs is `none`.
         split_view: *adw.OverlaySplitView,
+
+        /// Whether the adaptive breakpoint has been installed. It is added
+        /// lazily, the first time the sidebar is enabled, so that
+        /// gtk-sidebar-tabs = none leaves the window exactly as upstream
+        /// builds it.
+        breakpoint_added: bool = false,
         sidebar: *Sidebar,
 
         pub var offset: c_int = 0;
@@ -644,6 +650,14 @@ pub const Window = extern struct {
     /// The sidebar and the horizontal tab bar are alternatives, never both at
     /// once. `none` must leave upstream behaviour untouched — it is the escape
     /// hatch this fork promises, and the first thing to check on a regression.
+    fn breakpointApply(_: *adw.Breakpoint, self: *Self) callconv(.c) void {
+        self.private().split_view.setCollapsed(1);
+    }
+
+    fn breakpointUnapply(_: *adw.Breakpoint, self: *Self) callconv(.c) void {
+        self.private().split_view.setCollapsed(0);
+    }
+
     fn syncSidebar(self: *Self, config: *const configpkg.Config) void {
         const priv = self.private();
         const mode = config.@"gtk-sidebar-tabs";
@@ -656,6 +670,34 @@ pub const Window = extern struct {
         });
 
         if (show) priv.tab_bar.as(gtk.Widget).setVisible(0);
+
+        if (show and !priv.breakpoint_added) {
+            priv.breakpoint_added = true;
+
+            // libadwaita refuses to size a breakpoint against a window with no
+            // minimum, and says so on every launch. Setting it here rather
+            // than in the template keeps that requirement — and its side
+            // effects — off the `none` path entirely.
+            self.as(gtk.Widget).setSizeRequest(360, 240);
+
+            const condition = adw.BreakpointCondition.parse("max-width: 700px");
+            const breakpoint = adw.Breakpoint.new(condition);
+            _ = adw.Breakpoint.signals.apply.connect(
+                breakpoint,
+                *Self,
+                breakpointApply,
+                self,
+                .{},
+            );
+            _ = adw.Breakpoint.signals.unapply.connect(
+                breakpoint,
+                *Self,
+                breakpointUnapply,
+                self,
+                .{},
+            );
+            self.as(adw.ApplicationWindow).addBreakpoint(breakpoint);
+        }
     }
 
     fn syncAppearance(self: *Self) void {

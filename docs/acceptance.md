@@ -13,6 +13,16 @@ Two of these cases exist because adversarial review predicted the failure before
 a line was written, and both failures were real. They are marked ⚠ — if you only
 have time for two checks, do those.
 
+## Automated first
+
+```bash
+sh scripts/check-none-parity.sh
+```
+
+Diffs the fork's `none` mode against upstream's GTK/GLib warnings and asserts
+`left`/`right` emit no CRITICAL. It exists because the `none` promise has been
+broken twice, and nothing but a human reading a log ever caught it.
+
 ## Regression — the escape hatch
 
 `none` is the one promise this fork makes unconditionally. It has already been
@@ -83,3 +93,12 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
 - [ ] Narrow the window below ~700px: the split collapses and the sidebar
       overlays rather than permanently shrinking the terminal.
 - [ ] Widen it again: the sidebar returns to its own column.
+
+## Subtitle and colours
+
+- [ ] Each row shows the last segment of its working directory under the title,
+      and it changes on `cd`.
+- [ ] Right-click → Colour → Red marks the row.
+- [ ] With ~6 tabs, colour two, then scroll the list: the colours stay on the
+      right tabs. Rows are recycled, so this is the case that would expose
+      colour state living on the row instead of the page.

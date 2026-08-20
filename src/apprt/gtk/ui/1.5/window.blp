@@ -189,16 +189,6 @@ template $GhosttyWindow: Adw.ApplicationWindow {
     }
   };
 
-  // A narrow window should not spend columns on the sidebar. Below the
-  // threshold the split collapses, so the sidebar overlays the terminal on
-  // demand instead of permanently shrinking it.
-  Adw.Breakpoint {
-    condition ("max-width: 700px")
-
-    setters {
-      split_view.collapsed: true;
-    }
-  }
 }
 
 menu split_menu {
