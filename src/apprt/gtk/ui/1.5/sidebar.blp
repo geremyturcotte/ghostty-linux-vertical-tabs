@@ -11,7 +11,15 @@ template $GhosttySidebar: Adw.Bin {
       single-click-activate: true;
       activate => $row_activated();
 
-      model: Gtk.SingleSelection model {};
+      // autoselect must be off. It defaults on, and on an EMPTY model it
+      // forces a selection of item 0 — which reaches through AdwTabPages into
+      // adw_tab_view_get_nth_page(0) on a tab view with no pages yet, and
+      // trips an Adwaita assertion at window construction. The sidebar's
+      // highlight follows AdwTabView; it never forces a selection of its own.
+      model: Gtk.SingleSelection model {
+        autoselect: false;
+        can-unselect: true;
+      };
 
       styles [
         "navigation-sidebar",

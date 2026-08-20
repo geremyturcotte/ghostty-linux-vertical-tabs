@@ -147,26 +147,33 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         }
       }
 
-      Box {
-        orientation: vertical;
+      Adw.OverlaySplitView split_view {
+        show-sidebar: false;
+        sidebar-position: start;
 
-        $GhosttyDebugWarning {
-          visible: bind template.debug;
-        }
+        sidebar: $GhosttySidebar sidebar {};
 
-        Adw.ToastOverlay toast_overlay {
-          Adw.TabView tab_view {
-            notify::n-pages => $notify_n_pages();
-            notify::selected-page => $notify_selected_page();
-            close-page => $close_page();
-            page-attached => $page_attached();
-            page-detached => $page_detached();
-            create-window => $tab_create_window();
-            setup-menu => $setup_tab_menu();
-            menu-model: tab_context_menu;
-            shortcuts: none;
+        content: Box {
+          orientation: vertical;
+
+          $GhosttyDebugWarning {
+            visible: bind template.debug;
           }
-        }
+
+          Adw.ToastOverlay toast_overlay {
+            Adw.TabView tab_view {
+              notify::n-pages => $notify_n_pages();
+              notify::selected-page => $notify_selected_page();
+              close-page => $close_page();
+              page-attached => $page_attached();
+              page-detached => $page_detached();
+              create-window => $tab_create_window();
+              setup-menu => $setup_tab_menu();
+              menu-model: tab_context_menu;
+              shortcuts: none;
+            }
+          }
+        };
       }
     }
   };

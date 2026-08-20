@@ -264,6 +264,11 @@ pub const Window = extern struct {
         toolbar: *adw.ToolbarView,
         toast_overlay: *adw.ToastOverlay,
 
+        /// The collapsible split holding the vertical tab sidebar, and the
+        /// sidebar itself. Both are inert while gtk-sidebar-tabs is `none`.
+        split_view: *adw.OverlaySplitView,
+        sidebar: *Sidebar,
+
         pub var offset: c_int = 0;
     };
 
@@ -318,6 +323,9 @@ pub const Window = extern struct {
         // are only synced from the currently active tab.
         priv.tab_bindings = gobject.BindingGroup.new();
         priv.tab_bindings.bind("title", self.as(gobject.Object), "title", .{});
+
+        // The sidebar mirrors the tab view. It borrows it; it never owns it.
+        priv.sidebar.setTabView(priv.tab_view);
 
         // Set our window icon. We can't set this in the blueprint file
         // because its dependent on the build config.
@@ -619,6 +627,25 @@ pub const Window = extern struct {
     /// to call multiple times. This should be called whenever a change
     /// happens that might affect how the window appears (config change,
     /// fullscreen, etc.).
+    /// Show or hide the vertical tab sidebar.
+    ///
+    /// The sidebar and the horizontal tab bar are alternatives, never both at
+    /// once. `none` must leave upstream behaviour untouched — it is the escape
+    /// hatch this fork promises, and the first thing to check on a regression.
+    fn syncSidebar(self: *Self, config: *const configpkg.Config) void {
+        const priv = self.private();
+        const mode = config.@"gtk-sidebar-tabs";
+        const show = mode != .none;
+
+        priv.split_view.setShowSidebar(@intFromBool(show));
+        priv.split_view.setSidebarPosition(switch (mode) {
+            .right => .end,
+            else => .start,
+        });
+
+        if (show) priv.tab_bar.as(gtk.Widget).setVisible(0);
+    }
+
     fn syncAppearance(self: *Self) void {
         const priv = self.private();
         const widget = self.as(gtk.Widget);
@@ -700,6 +727,8 @@ pub const Window = extern struct {
             .top => priv.toolbar.addTopBar(priv.tab_bar.as(gtk.Widget)),
             .bottom => priv.toolbar.addBottomBar(priv.tab_bar.as(gtk.Widget)),
         }
+
+        self.syncSidebar(config);
 
         // Do our window-protocol specific appearance sync.
         priv.winproto.syncAppearance() catch |err| {
@@ -2092,6 +2121,8 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("tab_view", .{});
             class.bindTemplateChildPrivate("toolbar", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
+            class.bindTemplateChildPrivate("split_view", .{});
+            class.bindTemplateChildPrivate("sidebar", .{});
 
             // Template Callbacks
             class.bindTemplateCallback("realize", &windowRealize);

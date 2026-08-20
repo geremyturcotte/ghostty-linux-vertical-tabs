@@ -9,8 +9,8 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 1 | Symbol-first code citations | ✅ done |
 | 2 | `gtk-sidebar-tabs` config key | ✅ done |
 | 3 | `GhosttySidebar` widget, standalone | ✅ done |
-| 4 | Wire into the window, with focus | ⬜ next |
-| 5 | Toggle: action, keybind, header button | ⬜ |
+| 4 | Wire into the window, with focus | 🟡 built, needs eyes |
+| 5 | Toggle: action, keybind, header button | ⬜ next |
 | 6 | Per-row close button | ⬜ |
 | 7 | Adaptive collapse + acceptance checklist | ⬜ |
 | 8 | README, GIF, tagged release | ⬜ |
@@ -21,7 +21,10 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
   `ghostty +show-config --docs`. Default `left`.
 - The `GhosttySidebar` widget compiles: a `GtkListView` with a Blueprint row
   template, backed by a `GtkSingleSelection` over the tab view's pages.
-- **Nothing is visible yet.** The widget is not in the window — that is Task 4.
+- The sidebar is wired into the window behind `Adw.OverlaySplitView`, and the
+  binary launches clean in all three modes. **Nobody has looked at it yet** —
+  "launches without a GTK assertion" is not "looks right and behaves right".
+  That check needs a human, and it is what Task 4 is waiting on.
 
 ## Risks the work has settled
 
@@ -55,3 +58,11 @@ reading it later.
   code, and nothing imported `sidebar.zig` — a deliberately injected syntax
   error left the build green. Fixed by making it reachable, then re-verified the
   same way.
+- **`GtkSingleSelection` autoselects by default, and that broke `none`.** On an
+  empty model it forces a selection of item 0, which reaches through
+  `AdwTabPages` into `adw_tab_view_get_nth_page(0)` on a tab view with no pages
+  and trips an Adwaita assertion at window construction. It fired even with
+  `gtk-sidebar-tabs = none`, breaking this fork's central promise. Neither
+  `zig build` nor `zig build test` nor four rounds of design review caught it —
+  only launching the binary did. Measured three ways (upstream 0, `none` 1,
+  `left` 1), fixed with `autoselect: false`, re-measured at 0 across all three.
