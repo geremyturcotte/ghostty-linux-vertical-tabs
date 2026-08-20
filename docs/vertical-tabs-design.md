@@ -175,10 +175,10 @@ the declarative row template and the recycling that comes with `GtkListView`.
 ### 3.4 The close button — settled
 
 A `GtkBuilderListItemFactory` template cannot connect a signal to a Zig
-handler, so the close button needs some other way to act on its tab.
+handler, so the close button needs another way to act on its tab.
 
-**What was tried first, and why it failed.** Binding the button's action target
-to the row index — `action-name: "win.close-tab-at"` with
+**What was tried first, and refuted.** Binding the button's action target to the
+row index — `action-name: "win.close-tab-at"` with
 `action-target: bind template.position` — is the cheap answer, and it
 *compiles*. Blueprint emits a real GObject property binding:
 
@@ -187,35 +187,155 @@ to the row index — `action-name: "win.close-tab-at"` with
           bind-property="position" bind-flags="sync-create"/>
 ```
 
-It then fails at runtime, on the first row built:
+It then dies on the first row built:
 
 ```
 CRITICAL: GLib-GObject: gbinding.c:466:
 Unable to convert a value of type guint to a value of type GVariant
 ```
 
-GObject has no `guint`-to-`GVariant` transform. Two of three reviewers
-predicted this; they placed it at compile time, and it is a runtime failure —
-right about the mechanism, wrong about the moment. A build that goes green is
-not evidence here.
+GObject has no `guint`-to-`GVariant` transform. Two of three reviewers predicted
+this; they placed it at compile time, and it is a runtime failure — right about
+the mechanism, wrong about the moment. A green build is not evidence here.
 
 **What ships.** A dedicated row widget, `GhosttySidebarRow`
-(`class/sidebar_row.zig` + `ui/1.5/sidebar-row.blp`), carrying an
-`AdwTabPage` property. The factory template instantiates it and binds
-`page: bind template.item as <Adw.TabPage>` — an object-to-object binding,
-which GObject handles natively with no transform. The row owns its page, so it
-needs neither an index nor a variant, and its own template can carry a real
-`clicked` handler. It reaches the tab view with `ext.getAncestor(Window, …)`,
-the same idiom `split_tree.zig` and `title_dialog.zig` already use.
+(`class/sidebar_row.zig` + `ui/1.5/sidebar-row.blp`), carrying an `AdwTabPage`
+property. The factory instantiates it and binds
+`page: bind template.item as <Adw.TabPage>` — object to object, which GObject
+handles natively with no transform. The row owns its page, so it needs neither
+an index nor a variant, and its own template can carry a real `clicked` handler.
+It reaches the tab view with `ext.getAncestor(Window, …)`, the idiom
+`split_tree.zig` and `title_dialog.zig` already use.
 
-`win.close-tab-at(u)` remains registered — deliberately not named
-`win.close-tab`, which already exists with a string variant parsed into a
-`CloseTabMode`. It is reachable from a menu or from Zig, and reusing the taken
-name would have been a signature collision.
+`win.close-tab-at(u)` stays registered — deliberately not `win.close-tab`, which
+already exists with a string variant parsed into a `CloseTabMode`. Reusing the
+taken name would have been a signature collision.
 
-The declarative row survives intact: the title, tooltip and attention
-indicator are still Blueprint bindings, and there is still no per-row Zig
-callback in the list factory itself.
+The declarative row survives intact: title, tooltip and the attention indicator
+are still Blueprint bindings, and the list factory still has no per-row Zig
+callback.
+
+## 4. Behavior
+
+**Config.** A new key, `gtk-sidebar-tabs = none | left | right`, defaulting to
+`left`. Reviving `gtk-tabs-location = left` was rejected: a narrow rotated tab
+strip has no room for readable titles, and the title is the entire point when
+several long-running sessions are open. Reusing the old name for different
+behavior would also mislead anyone searching for the removed option.
+
+**`none` must be byte-identical to upstream.** It is the escape hatch and the
+first regression test. All sidebar logic sits behind that guard.
+
+**Toggle.** A `win.toggle-sidebar` action, a header-bar button, and
+`ctrl+shift+b` — verified unbound in Ghostty's defaults, and consistent with
+both the `ctrl+shift+*` convention and the VS Code muscle memory.
+
+**Tab bar.** Sidebar active ⇒ `tab_bar` hidden regardless of
+`window-show-tab-bar`. Sidebar `none` ⇒ upstream behavior untouched. This hooks
+into `syncAppearance()` (`window.zig`, v1.3.1: 621) as a **single call** into
+`sidebar.zig`, never an inline block — a one-line rebase conflict is trivial to
+resolve, a block is not.
+
+**Adaptive collapse.** An `AdwBreakpoint` on window width flips
+`AdwOverlaySplitView` to overlay mode below a threshold, so a narrow window does
+not lose terminal columns to the sidebar.
+
+**Focus.** `row-activated` calls `setSelectedPage()` **and then** `grabFocus()`
+on the active surface, and the sidebar stays out of the keyboard focus chain
+during normal terminal use. See §7 — this is the highest-severity risk in the
+design.
+
+## 5. Fork and rebase strategy
+
+This repository is a **detached** copy, not a GitHub fork: GitHub excludes forks
+from search by default, which defeats the point of a repository named for what
+people search. Upstream is a git remote, so rebasing is unaffected.
+
+```
+main      mirrors the current upstream tag (v1.3.1); never modified
+sidebar   2-3 clean commits, REBASED onto each new upstream tag
+tags      v1.3.1-sidebar.1, v1.4.0-sidebar.1, …
+```
+
+Rebase, never merge: the patch stays a readable series a stranger can audit.
+
+**Diff shape is the load-bearing constraint.** Two new files carry the logic.
+Four upstream files receive insertion points only:
+
+| File | Change |
+|---|---|
+| `src/apprt/gtk/ui/1.5/window.blp` | wrap content in `Adw.OverlaySplitView`, add sidebar child |
+| `src/apprt/gtk/class/window.zig` | property, action, one call in `syncAppearance()` |
+| `src/config/Config.zig` | the `gtk-sidebar-tabs` key |
+| build glue | register `sidebar.blp` |
+| `class/application.zig` | one fixed GTK accelerator for the toggle |
+
+**The fifth file, justified.** `application.zig` was not in the original four.
+Ghostty's `keybind =` config can only target an `input.Binding.Action`, so a
+configurable keyboard toggle would mean adding a variant to `Binding.zig` and
+threading it through `Surface.zig`, `apprt/action.zig` and `input/command.zig` —
+measured at **six** more upstream files, three of them core. A terminal feature
+that only responds to the mouse is not worth much, so the toggle instead gets a
+fixed GTK accelerator (`<Ctrl><Shift>b`) set beside the existing
+`syncActionAccelerator` calls: one insertion, in one GTK-local file, appended to
+a list that is already a column of near-identical lines. The trade is explicit —
+the shortcut is **not** configurable through `keybind =`. Making it configurable
+is the six-file change, and that is a decision to take deliberately, not by
+drift.
+
+`window.zig` is 2346 lines and handles titlebar style, tab autohide, winproto,
+config sync and tab-view signals. It will conflict on most non-trivial upstream
+GTK commits. That is accepted, not denied.
+
+**Measured, not assumed (2026-08-20).** The strategy was tested by replaying the
+whole series onto `upstream/main`, **2154 commits** past the v1.3.1 base, with
+every one of the five touched files having moved meanwhile — `Config.zig` 43
+commits, `application.zig` 28, `window.zig` 16, `window.blp` 3, `gresource.zig`
+2.
+
+All ten commits replayed. The **total** conflict was **two hunks, one line
+against one line each**, both the same shape: upstream appended
+`prompt-window-title` to the window's action array while this fork appended
+`toggle-sidebar` and `close-tab-at`. Resolution is "keep both lines".
+`application.zig` and `window.blp` auto-merged untouched. The insertion-only
+shape paid off exactly as intended, and it is now evidence rather than a claim.
+
+**libadwaita gating.** `AdwOverlaySplitView` requires 1.4. Ghostty's
+version-gated `ui/1.0|1.2|1.3|1.4|1.5` scheme means the sidebar exists only from
+1.4 up; older libadwaita degrades to stock upstream behavior. No blueprint is
+duplicated into `ui/1.0`–`ui/1.3`.
+
+**License.** Ghostty is MIT. Upstream copyright is preserved and attributed. The
+README states plainly that this is a fork of Ghostty by Mitchell Hashimoto and
+does **not** imply the feature is coming upstream. No PR will be opened against
+`ghostty-org/ghostty` — the discussion is locked and it would be closed.
+
+## 6. Build and test
+
+Ghostty requires **Zig 0.16.0** (`build.zig.zon` `minimum_zig_version`,
+corroborated by `flake.nix`) — newer than Ubuntu's repositories, so it is a
+manual install.
+
+Phase 0 is blocking: **unmodified upstream must build and launch on the target
+machine** before a line of sidebar code is written. Baseline on Ubuntu 24.04:
+
+| Component | State |
+|---|---|
+| GTK 4.14.5, libadwaita 1.5.0 (runtime) | present — `OverlaySplitView` available |
+| zig 0.16.0 | absent |
+| blueprint-compiler | absent — Ubuntu 24.04's build may be too old for Ghostty's `.blp` syntax |
+| pkg-config, `libgtk-4-dev`, `libadwaita-1-dev` | absent — `libadwaita-1-dev` also supplies `Adw-1.typelib`, required by blueprint-compiler to resolve the `Adw.TabPage` cast |
+
+**Testing, honestly.** A GTK widget does not submit to classic TDD. What is
+defensible:
+
+1. Upstream `zig build test` stays green.
+2. A versioned manual acceptance checklist, including a dedicated case for the
+   focus bug in §7 — it surfaces no other way.
+3. `gtk-sidebar-tabs = none` produces behavior identical to upstream.
+
+## 7. Risks
+
 ### P0 — sidebar clicks steal keyboard focus
 
 `tabViewSelectedPage()` in `window.zig` (v1.3.1: 1461-1483) does **not** call
