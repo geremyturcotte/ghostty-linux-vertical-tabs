@@ -18,6 +18,8 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 10 | Working-directory subtitle | ✅ done, verified on screen |
 | 11 | Per-tab colour marks | ✅ done, verified on screen |
 | 12 | `none`-parity regression guard | ✅ done |
+| 13 | External code review, applied | ✅ done |
+| 14 | Tagged release `v1.3.1-sidebar.1` | ✅ done |
 
 ## What works right now
 
@@ -77,6 +79,17 @@ reading it later.
   code, and nothing imported `sidebar.zig` — a deliberately injected syntax
   error left the build green. Fixed by making it reachable, then re-verified the
   same way.
+- **An external review found a use-after-free, and was unanimously wrong about
+  a leak.** Three models reviewed the widgets before tagging. `notify::selected-page`
+  was connected on the tab view and never disconnected — a real use-after-free
+  on window teardown, fixed. All three also said the working-directory closure
+  leaked; the fix made the binary abort with `munmap_chunk(): invalid pointer`
+  in every mode, proving something does free that string and the original code
+  was right. Reverted.
+- **The parity guard passed while the binary was crashing.** It only grepped
+  logs and swallowed exit status with `|| true`. It now checks exit codes and
+  was verified against a stub that dies on SIGABRT. A guard blind to a crash is
+  worse than none, because it is believed.
 - **`AdwBreakpoint` needs a window minimum size, and that broke `none` too.**
   Declared in the template, it warned on every launch — including with the
   sidebar off. Second break of the same promise, found the same way: a human
