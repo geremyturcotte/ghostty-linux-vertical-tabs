@@ -269,6 +269,18 @@ Four upstream files receive insertion points only:
 | `src/config/Config.zig` | the `gtk-sidebar-tabs` key |
 | build glue | register `sidebar.blp` |
 | `class/application.zig` | one fixed GTK accelerator for the toggle |
+| `src/build/Config.zig` | let a fork tag its own releases (see below) |
+
+**The sixth file, justified — and found the hard way.** Upstream's build panics
+if HEAD sits on a tag that is not exactly the version declared in
+`build.zig.zon`. In this repository that name, `v1.3.1`, is already taken by the
+upstream tag this branch is based on, so **any** fork tag at all made
+`zig build` panic — on the branch as much as on the tag. The first release was
+published before this was noticed, and for a few minutes the repository could
+not be built by anyone following its own README. `src/build/Config.zig` now
+accepts `vX.Y.Z-<suffix>` and carries the suffix as the prerelease, so
+`ghostty +version` reports `1.3.1-sidebar.1+<sha>`. Without this a fork cannot
+tag a release at all, ever.
 
 **The fifth file, justified.** `application.zig` was not in the original four.
 Ghostty's `keybind =` config can only target an `input.Binding.Action`, so a

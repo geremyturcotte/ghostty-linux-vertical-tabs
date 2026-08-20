@@ -79,6 +79,12 @@ reading it later.
   code, and nothing imported `sidebar.zig` — a deliberately injected syntax
   error left the build green. Fixed by making it reachable, then re-verified the
   same way.
+- **Tagging the release broke the build, for everyone.** Upstream panics when
+  HEAD is on a tag that is not exactly the declared version — a name already
+  taken here by the upstream tag. So the fork's own release tag made
+  `zig build` fail on the branch too, and the first release was published
+  unbuildable. Found by running `zig build --help` on the tagged tree, minutes
+  after publishing. `src/build/Config.zig` now accepts a fork suffix.
 - **An external review found a use-after-free, and was unanimously wrong about
   a leak.** Three models reviewed the widgets before tagging. `notify::selected-page`
   was connected on the tab view and never disconnected — a real use-after-free

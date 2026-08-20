@@ -253,7 +253,25 @@ pub fn init(b: *std.Build, appVersion: []const u8) !Config {
                 });
 
                 if (!std.mem.eql(u8, tag, expected)) {
-                    @panic("tagged releases must be in vX.Y.Z format matching build.zig");
+                    // A fork has to be able to tag its own releases. This check
+                    // only tolerated the exact upstream version — and that name
+                    // is already taken here by the upstream tag this branch is
+                    // based on — so ANY fork tag made `zig build` panic, on the
+                    // branch as much as on the tag. Accept `vX.Y.Z-<suffix>`
+                    // and carry the suffix as the prerelease, so `+version`
+                    // still says which build this is.
+                    const fork_prefix = b.fmt("{s}-", .{expected});
+                    if (!std.mem.startsWith(u8, tag, fork_prefix)) {
+                        @panic("tagged releases must be vX.Y.Z, or vX.Y.Z-<suffix> for a fork, matching build.zig");
+                    }
+
+                    break :version .{
+                        .major = app_version.major,
+                        .minor = app_version.minor,
+                        .patch = app_version.patch,
+                        .pre = tag[fork_prefix.len..],
+                        .build = vsn.short_hash,
+                    };
                 }
 
                 break :version .{
