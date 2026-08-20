@@ -4,7 +4,13 @@ using Adw 1;
 template $GhosttySidebarRow: Adw.Bin {
   Gtk.Box {
     orientation: horizontal;
-    spacing: 6;
+    spacing: 8;
+    // Breathing room. Without it the two labels collide and the list reads as
+    // a wall of text rather than a set of distinct tabs.
+    margin-top: 8;
+    margin-bottom: 8;
+    margin-start: 6;
+    margin-end: 6;
     tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
 
     Gtk.Image colour_dot {
@@ -16,6 +22,7 @@ template $GhosttySidebarRow: Adw.Bin {
 
     Gtk.Box {
       orientation: vertical;
+      spacing: 2;
       hexpand: true;
       valign: center;
 
