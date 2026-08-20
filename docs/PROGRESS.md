@@ -11,9 +11,9 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 3 | `GhosttySidebar` widget, standalone | ✅ done |
 | 4 | Wire into the window, with focus | ✅ done, verified on screen |
 | 5 | Toggle: action, keybind, header button | ✅ done, verified on screen |
-| 6 | Per-row close button | 🟡 built, needs a click |
-| 7 | Adaptive collapse + acceptance checklist | ⬜ next |
-| 8 | README, GIF, tagged release | ⬜ |
+| 6 | Per-row close button | ✅ done, verified on screen |
+| 7 | Adaptive collapse + acceptance checklist | 🟡 built, checklist to run |
+| 8 | README, GIF, tagged release | ⬜ next |
 
 ## What works right now
 
