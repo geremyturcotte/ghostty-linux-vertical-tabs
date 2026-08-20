@@ -47,7 +47,7 @@ tabs — select, close, live titles, bell indicator, keyboard toggle.
 
 | Deferred | Why |
 |---|---|
-| Drag-to-reorder rows | `GtkListBox` has no native reorderable mode; this is ~200 lines of manual `GtkDragSource`/`GtkDropTarget` plumbing. The existing `move_tab` keybind already covers the need. Revisit in v1.1. |
+| Drag-to-reorder rows | Reordering is owned by `AdwTabView` (`adw_tab_view_reorder_page()`), so rows need manual `GtkDragSource`/`GtkDropTarget` plumbing and drop-index math. The existing `move_tab` keybind already covers the need. Revisit in v1.1. |
 | Per-tab icons | Ghostty never sets an icon on a page (verified — see §7). Rendering one means reaching into `GhosttyTab`/`GhosttySurface` internals, which widens the rebase surface. |
 | Project/workspace grouping | A second data model on top of `AdwTabView`. Separate feature, separate design. |
 | Git panel | Out of scope. This is a tab sidebar. |
@@ -104,18 +104,104 @@ The widget takes an `AdwTabView` and knows nothing else about Ghostty. That
 boundary is what keeps the edits to `window.zig` small, and small edits are what
 make rebases survivable.
 
-- **Model:** `adw_tab_view_get_pages()` returns an `AdwTabPages` implementing
-  `GtkSelectionModel`. It emits `items-changed` on open/close/reorder, and its
-  selection is a live proxy of `AdwTabView:selected-page` — so row→tab and
-  tab→row stay in sync without hand-written synchronization.
-- **View:** `GtkListBox` + `gtk_list_box_bind_model()`, *not* `GtkListView` +
-  `GtkSignalListItemFactory`. The factory pattern needs four C-ABI callbacks
-  wired individually from Zig; `bind_model` needs one. At 5-30 tabs the only
-  thing lost is row recycling, which is worthless at this scale.
+The implementation mirrors `command_palette`, which already solves this exact
+problem in this exact codebase — see `ui/1.5/command-palette.blp:30-90` and
+`class/command_palette.zig:304`. It mirrors it in *topology*, not only in
+widget choice; §3.3 explains why that distinction is load-bearing.
+
+- **Model:** `Gtk.SingleSelection` wrapping the `AdwTabPages` returned by
+  `adw_tab_view_get_pages()`. The wrapper is assigned from Zig, since the pages
+  model originates from the window's `AdwTabView` at runtime.
+- **View:** `GtkListView` with `single-click-activate: true` and a
+  **`GtkBuilderListItemFactory`** whose `template Gtk.ListItem` is declared in
+  Blueprint. Row properties bind declaratively
+  (`label: bind template.item as <Adw.TabPage>.title`), so **no per-row Zig
+  callback exists** — the only Zig handler is `activate`, three lines, exactly
+  as `command_palette.zig:304`. The blueprint must declare `using Adw 1;`, and
+  `Adw-1.typelib` must be present at build time (it ships in
+  `libadwaita-1-dev`).
+- **Synchronization** is explicit, in two small handlers:
+  - row → tab: `activate` delivers a position; look up
+    `tab_view.getNthPage(pos)`, call `setSelectedPage()`, then `grabFocus()`.
+  - tab → row: `AdwTabView notify::selected-page` sets the wrapper's selected
+    index, so the highlight follows tab switches driven from anywhere else.
+    This handler **must** guard two cases before any index lookup: a null
+    `selected-page` (window teardown), and a page no longer present in the local
+    model — a tab dragged out via `AdwTabView::create-window` fires both
+    `items-changed` and `notify::selected-page`, and an unguarded lookup there is
+    a crash or a silently wrong highlight.
 - **Lifetime:** the pages model is owned by the `AdwTabView`. Drop the reference
   explicitly in `dispose` rather than relying on teardown order.
-- **Row:** title (bound to `page.title`), tooltip (`page.tooltip`),
-  `needs-attention` indicator, close button on hover.
+- **Row:** title (`page.title`), tooltip (`page.tooltip`), `needs-attention`
+  indicator, close button — see §3.4, which is the least settled part of this
+  design.
+
+### 3.3 Why the model is wrapped, and not handed over directly
+
+The obvious design hands `AdwTabPages` to the `GtkListView` as its selection
+model. `AdwTabPages` implements `GtkSelectionModel`, `GtkListView` consumes one,
+and selection would then synchronize in both directions with no handlers at all.
+
+That design is wrong, and the reason is specific: **in `AdwTabPages`, selecting
+is switching.** The model proxies `AdwTabView:selected-page`, so any selection
+change immediately switches the live terminal tab. `GtkListView` with
+`single-click-activate: true` selects rows *on hover*. Merely moving the pointer
+across the sidebar would have switched the user's terminal, and arrow-keying
+through the list would have thrashed it.
+
+`command_palette` sets `single-click-activate: true` safely because its model is
+a `Gtk.SingleSelection` over a `GtkFilterListModel`, where selection carries no
+side effect. Copying its widget without copying its topology would have imported
+the attribute and lost the property that makes the attribute safe.
+
+Wrapping in `Gtk.SingleSelection` restores that separation: the list owns a
+selection that means "highlighted", and tab switching happens only on explicit
+activation. The cost is the two handlers above — real hand-written
+synchronization, chosen deliberately rather than overlooked.
+
+### Why not `GtkListBox` + `gtk_list_box_bind_model()`
+
+An earlier revision chose `GtkListBox`, reasoning that `GtkListView` needs four
+C-ABI callbacks (`setup`/`bind`/`unbind`/`teardown`) wired individually from Zig.
+That reasoning assumed `GtkSignalListItemFactory`. Ghostty does not use it:
+`command_palette` uses `GtkBuilderListItemFactory`, the row is a Blueprint
+template, and the per-row callback count is zero.
+
+`GtkListBox` would also have forced the same explicit selection synchronization
+in the end — it predates `GtkSelectionModel` and ignores it — while giving up
+the declarative row template and the recycling that comes with `GtkListView`.
+
+
+### 3.4 The close button, and why it is not yet settled
+
+A factory template cannot connect a signal to a Zig handler, and a `GAction`
+target must be a `GVariant`, so an `AdwTabPage` cannot be an action target. The
+row index is the natural substitute. Two things complicate it.
+
+**The obvious action name is taken.** `win.close-tab` already exists —
+registered at `window.zig:359` with `s_variant_type` and parsed by
+`actionCloseTab` into a `CloseTabMode` enum (`this`/`other`/`right`) operating on
+the context-menu page. A `uint32` action under that name would collide with an
+incompatible signature. The new action is therefore **`win.close-tab-at`**,
+taking `u`.
+
+**The declarative binding is unproven.** `action-target: bind template.position`
+would keep the whole row declarative. Reviewers split 2-1 on whether Blueprint
+accepts a `bind` expression on `action-target`, which is typed `GVariant` rather
+than a plain bindable property; and `grep -rn 'action-name|action-target'
+src/apprt/gtk/ui/` returns nothing, so the repository offers no precedent either
+way. `GtkListItem:position` also requires GTK >= 4.12 (the target ships 4.14.5).
+It is tried first because it is cheaper, but it is not load-bearing.
+
+**Named fallback:** a `GtkSignalListItemFactory` for the close button alone, or a
+small Zig `clicked` handler that reads `GtkListItem:position` at click time and
+activates `win.close-tab-at` imperatively. The design already accepts one Zig
+handler for `activate`; a second changes nothing architecturally. Settled by
+experiment in Phase 4.
+
+Closing by index carries a staleness race: the index is captured when the row
+renders and resolved when the button fires. Drag-reorder is deferred in v1, so
+the only opening is a concurrent close of an earlier tab. Accepted for v1.
 
 ## 4. Behavior
 
@@ -199,7 +285,7 @@ machine** before a line of sidebar code is written. Baseline on Ubuntu 24.04:
 | GTK 4.14.5, libadwaita 1.5.0 (runtime) | present — `OverlaySplitView` available |
 | zig 0.16.0 | absent |
 | blueprint-compiler | absent — Ubuntu 24.04's build may be too old for Ghostty's `.blp` syntax |
-| pkg-config, `libgtk-4-dev`, `libadwaita-1-dev` | absent |
+| pkg-config, `libgtk-4-dev`, `libadwaita-1-dev` | absent — `libadwaita-1-dev` also supplies `Adw-1.typelib`, required by blueprint-compiler to resolve the `Adw.TabPage` cast |
 
 **Testing, honestly.** A GTK widget does not submit to classic TDD. What is
 defensible:
@@ -225,6 +311,13 @@ dependent on focus state, so it is miserable to reproduce after the fact.
 This risk was surfaced by adversarial review before implementation, independently
 by two reviewers, and confirmed against the source. The mitigation is in §4.
 
+**The same failure has a second entrance.** When the breakpoint puts the sidebar
+in overlay mode and it is dismissed while it holds focus, focus is left nowhere
+and the terminal is input-dead until the user clicks it. A
+`notify::show-sidebar` handler restores focus to the active surface whenever the
+sidebar hides. Both entrances are one bug — keyboard focus must never be left on
+a widget that just disappeared.
+
 ### Verified facts the design leans on
 
 | Claim | Evidence |
@@ -234,6 +327,19 @@ by two reviewers, and confirmed against the source. The mitigation is in §4.
 | **No** per-page icon exists | the only `setIconName` is `window.zig:343`, on the window itself |
 | `syncAppearance` re-parents the tab bar | `window.zig:757` `toolbar.remove(tab_bar)`, `:759` `addTopBar` |
 | `ctrl+shift+b` is unbound | absent from `ghostty +show-config --default` |
+
+### Deliberately out of scope
+
+Switching tabs through `AdwTabOverview` leaves focus on the tab-view chrome
+rather than the terminal surface, because `tabViewSelectedPage`
+(`window.zig:1671-1693`) never calls `grabFocus`. This is **pre-existing upstream
+behavior**, not something the sidebar introduces, and fixing it would widen the
+diff into code this fork has no reason to own. Recorded so a future reader does
+not mistake it for a sidebar regression.
+
+Reviewers disagreed on whether `AdwTabPages` implements `GtkSelectionModel` or
+only `GListModel`. The wrapped design consumes it strictly as a `GListModel`, so
+it is **insensitive to the answer** — a property worth keeping.
 
 ### Unverified, carried as risk
 
@@ -245,6 +351,15 @@ by two reviewers, and confirmed against the source. The mitigation is in §4.
   the fix is to lock sidebar state for the duration of the overview transition.
 - Behavior of the `AdwTabPages` model if the `AdwTabView` is disposed first is
   undocumented. Handled defensively rather than relied upon.
+- A Blueprint factory template binds against the item type
+  (`bind template.item as <Adw.TabPage>.title`). Every in-repo use of this idiom
+  casts to a Ghostty-defined type; casting to a libadwaita type is expected to
+  work but is unverified here. Settled in Phase 2.
+- No `.blp` in the repository casts to a libadwaita type today
+  (`grep -rn 'as <Adw\.' src/apprt/gtk/ui/` returns nothing), so
+  `bind template.item as <Adw.TabPage>.title` would be the first. Expected to
+  work — blueprint resolves any GIR-registered type — but unproven here.
+  Settled in Phase 2.
 
 ## 8. Implementation phases
 
@@ -252,11 +367,17 @@ Each phase ends on a build that runs.
 
 0. **Baseline** — unmodified upstream builds and launches.
 1. **Config** — `gtk-sidebar-tabs` key plumbed, no UI.
-2. **Widget** — `GhosttySidebar` standalone, list renders.
-3. **Wiring** — `window.blp` insertion, `syncAppearance()` rule.
-4. **Focus** — the P0 mitigation and its acceptance test.
+2. **Widget** — `GhosttySidebar` standalone: Blueprint row template, list renders
+   against a real `AdwTabView`, selection follows in both directions.
+3. **Wiring + focus** — `window.blp` insertion, `syncAppearance()` rule, and the
+   `grabFocus()` call in the same `activate` handler that switches the tab.
+   These are one phase on purpose: a clickable sidebar without the focus call is
+   an input-dead build, and the phase rule promises a build that runs.
+4. **Hardening** — acceptance checklist, close-button action, focus and
+   animation edge cases.
 5. **Polish** — adaptive breakpoint, keybind, header-bar button.
 6. **Release** — README, GIF, tagged build.
+
 
 ---
 
@@ -276,10 +397,20 @@ the repository owner.** Specifically:
   the config surface via `ghostty +validate-config` and `+show-config` on the
   target machine, and the upstream decision via GitHub Discussion #2549. Line
   numbers in §7 point at real code and can be checked.
-- The architecture was subjected to adversarial multi-model review before being
-  written down. Three of the original design's assumptions were rejected — a
-  full-height sidebar, `GtkListView` with a factory, and the claimed maintenance
-  surface — and §3, §5 and §7 record the corrections rather than hiding them.
+- The architecture was subjected to **four rounds** of adversarial multi-model
+  review before implementation, looping until a round produced no new
+  substantive finding. Round 1 rejected a full-height sidebar and the claimed
+  maintenance surface; round 2 caught that `single-click-activate` selects on
+  hover, which would have switched the live terminal tab on mouse-over; round 3
+  rejected the close-button action mechanism; round 4 returned no findings from
+  any reviewer. Corrections are recorded in place — §3.3, §3.4 and §7 state what
+  was wrong and why — rather than quietly replaced.
+- Reviewer output was not taken on trust. Every accepted finding was checked
+  against the source, and the check found things the reviewers missed: that
+  Ghostty builds lists with `GtkBuilderListItemFactory` (which reversed a
+  reviewer recommendation), that no blueprint in the repository casts to a
+  libadwaita type, and that `win.close-tab` was already taken by an incompatible
+  signature.
 - Scope, positioning, and product decisions were made by the repository owner.
 
 **On the human-in-the-loop requirement:** Ghostty's policy asks that a
