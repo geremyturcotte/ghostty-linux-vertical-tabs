@@ -15,6 +15,8 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 7 | Adaptive collapse + acceptance checklist | 🟡 built, checklist to run |
 | 8 | README, GIF, tagged release | 🟡 README done; screenshot + tag left |
 | 9 | Right-click menu on rows | 🟡 built, needs a right-click |
+| 10 | Working-directory subtitle | 🟡 built, needs eyes |
+| 11 | Per-tab colour marks | 🟡 built, needs eyes |
 
 ## What works right now
 

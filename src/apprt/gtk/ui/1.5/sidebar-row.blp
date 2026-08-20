@@ -7,12 +7,36 @@ template $GhosttySidebarRow: Adw.Bin {
     spacing: 6;
     tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
 
-    Gtk.Label {
-      ellipsize: end;
-      halign: start;
+    Gtk.Image colour_dot {
+      icon-name: "media-record-symbolic";
+      pixel-size: 8;
+      valign: center;
+      visible: false;
+    }
+
+    Gtk.Box {
+      orientation: vertical;
       hexpand: true;
-      single-line-mode: true;
-      label: bind template.page as <Adw.TabPage>.title;
+      valign: center;
+
+      Gtk.Label {
+        ellipsize: end;
+        halign: start;
+        single-line-mode: true;
+        label: bind template.page as <Adw.TabPage>.title;
+      }
+
+      Gtk.Label {
+        ellipsize: start;
+        halign: start;
+        single-line-mode: true;
+        label: bind $computed_cwd(template.page as <Adw.TabPage>.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd) as <string>;
+
+        styles [
+          "caption",
+          "dim-label",
+        ]
+      }
     }
 
     Gtk.Image {
@@ -52,6 +76,35 @@ menu row_menu {
   item {
     label: _("Change Tab Title…");
     action: "row.rename";
+  }
+
+  submenu {
+    label: _("Colour");
+
+    item {
+      label: _("None");
+      action: "row.colour-none";
+    }
+
+    item {
+      label: _("Blue");
+      action: "row.colour-accent";
+    }
+
+    item {
+      label: _("Green");
+      action: "row.colour-success";
+    }
+
+    item {
+      label: _("Orange");
+      action: "row.colour-warning";
+    }
+
+    item {
+      label: _("Red");
+      action: "row.colour-error";
+    }
   }
 
   item {
