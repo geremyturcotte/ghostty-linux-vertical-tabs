@@ -9,8 +9,8 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 1 | Symbol-first code citations | ✅ done |
 | 2 | `gtk-sidebar-tabs` config key | ✅ done |
 | 3 | `GhosttySidebar` widget, standalone | ✅ done |
-| 4 | Wire into the window, with focus | 🟡 built, needs eyes |
-| 5 | Toggle: action, keybind, header button | ⬜ next |
+| 4 | Wire into the window, with focus | ✅ done, verified on screen |
+| 5 | Toggle: action, keybind, header button | 🟡 built, shortcut untested |
 | 6 | Per-row close button | ⬜ |
 | 7 | Adaptive collapse + acceptance checklist | ⬜ |
 | 8 | README, GIF, tagged release | ⬜ |
@@ -21,10 +21,23 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
   `ghostty +show-config --docs`. Default `left`.
 - The `GhosttySidebar` widget compiles: a `GtkListView` with a Blueprint row
   template, backed by a `GtkSingleSelection` over the tab view's pages.
-- The sidebar is wired into the window behind `Adw.OverlaySplitView`, and the
-  binary launches clean in all three modes. **Nobody has looked at it yet** —
-  "launches without a GTK assertion" is not "looks right and behaves right".
-  That check needs a human, and it is what Task 4 is waiting on.
+- The sidebar shows on screen, lists the open tabs, and switching works.
+  Confirmed by hand, not inferred from a clean log: clicking a row switches the
+  tab and the keyboard returns to the terminal, and hovering rows does **not**
+  switch anything. Those are the two defects adversarial review predicted before
+  a line was written — both absent in practice.
+
+## Deferred to v1.1
+
+Showing **panes** in the sidebar as a second level under each tab, renameable
+in place. Deliberately out of v1: panes live in `GhosttySplitTree`, not in
+`AdwTabPages`, so it needs a data model of our own rather than a tweak.
+
+Splitting and renaming already work today without any of this —
+`ctrl+shift+o` / `ctrl+shift+e` split, and the `prompt_surface_title` /
+`prompt_tab_title` actions rename a pane or a tab. Those two actions ship with
+**no default keybind**, which is the only thing missing; two lines of config
+fix it.
 
 ## Risks the work has settled
 

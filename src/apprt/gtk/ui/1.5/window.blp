@@ -51,6 +51,17 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         };
 
         [start]
+        Gtk.ToggleButton {
+          icon-name: "sidebar-show-symbolic";
+          tooltip-text: _("Toggle Tab Sidebar");
+          active: bind split_view.show-sidebar bidirectional;
+          // Kept out of the terminal's focus chain, like its neighbours: a
+          // titlebar button must never hold the keyboard.
+          can-focus: false;
+          focus-on-click: false;
+        }
+
+        [start]
         Adw.SplitButton {
           clicked => $new_tab();
           icon-name: "tab-new-symbolic";

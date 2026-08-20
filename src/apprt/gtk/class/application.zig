@@ -1150,6 +1150,16 @@ pub const Application = extern struct {
         self.syncActionAccelerator("split-tree.new-split::right", .{ .new_split = .right });
         self.syncActionAccelerator("split-tree.new-split::up", .{ .new_split = .up });
         self.syncActionAccelerator("split-tree.new-split::down", .{ .new_split = .down });
+
+        // The sidebar toggle has no input.Binding.Action, so it cannot be
+        // reached by a `keybind =` line. Adding one would mean touching
+        // Binding.zig, Surface.zig, apprt/action.zig and command.zig — core
+        // files this fork has every reason not to own. A fixed accelerator
+        // buys the keyboard gesture for one line in one GTK-local file.
+        {
+            const accels = [_:null]?[*:0]const u8{"<Ctrl><Shift>b"};
+            self.as(gtk.Application).setAccelsForAction("win.toggle-sidebar", &accels);
+        }
     }
 
     fn syncActionAccelerator(

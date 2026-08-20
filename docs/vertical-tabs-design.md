@@ -256,6 +256,20 @@ Four upstream files receive insertion points only:
 | `src/apprt/gtk/class/window.zig` | property, action, one call in `syncAppearance()` |
 | `src/config/Config.zig` | the `gtk-sidebar-tabs` key |
 | build glue | register `sidebar.blp` |
+| `class/application.zig` | one fixed GTK accelerator for the toggle |
+
+**The fifth file, justified.** `application.zig` was not in the original four.
+Ghostty's `keybind =` config can only target an `input.Binding.Action`, so a
+configurable keyboard toggle would mean adding a variant to `Binding.zig` and
+threading it through `Surface.zig`, `apprt/action.zig` and `input/command.zig` —
+measured at **six** more upstream files, three of them core. A terminal feature
+that only responds to the mouse is not worth much, so the toggle instead gets a
+fixed GTK accelerator (`<Ctrl><Shift>b`) set beside the existing
+`syncActionAccelerator` calls: one insertion, in one GTK-local file, appended to
+a list that is already a column of near-identical lines. The trade is explicit —
+the shortcut is **not** configurable through `keybind =`. Making it configurable
+is the six-file change, and that is a decision to take deliberately, not by
+drift.
 
 `window.zig` is 2346 lines and handles titlebar style, tab autohide, winproto,
 config sync and tab-view signals. It will conflict on most non-trivial upstream

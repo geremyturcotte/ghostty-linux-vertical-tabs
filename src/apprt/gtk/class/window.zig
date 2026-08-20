@@ -327,6 +327,14 @@ pub const Window = extern struct {
         // The sidebar mirrors the tab view. It borrows it; it never owns it.
         priv.sidebar.setTabView(priv.tab_view);
 
+        _ = gobject.Object.signals.notify.connect(
+            priv.split_view,
+            *Self,
+            notifyShowSidebar,
+            self,
+            .{ .detail = "show-sidebar" },
+        );
+
         // Set our window icon. We can't set this in the blueprint file
         // because its dependent on the build config.
         self.as(gtk.Window).setIconName(build_config.bundle_id);
@@ -371,6 +379,7 @@ pub const Window = extern struct {
             .init("prompt-surface-title", actionPromptSurfaceTitle, null),
             .init("prompt-tab-title", actionPromptTabTitle, null),
             .init("prompt-context-tab-title", actionPromptContextTabTitle, null),
+            .init("toggle-sidebar", actionToggleSidebar, null),
             .init("ring-bell", actionRingBell, null),
             .init("split-right", actionSplitRight, null),
             .init("split-left", actionSplitLeft, null),
@@ -1830,6 +1839,29 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         self.as(gtk.Window).close();
+    }
+
+    fn actionToggleSidebar(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        const showing = priv.split_view.getShowSidebar() != 0;
+        priv.split_view.setShowSidebar(@intFromBool(!showing));
+    }
+
+    /// Hiding the sidebar must never strand the keyboard on a widget that
+    /// just disappeared. This is the second entrance to the bug the sidebar's
+    /// row-activate handler already guards: focus goes back to the terminal.
+    fn notifyShowSidebar(
+        _: *adw.OverlaySplitView,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        if (priv.split_view.getShowSidebar() != 0) return;
+        if (self.getActiveSurface()) |surface| surface.grabFocus();
     }
 
     fn actionCloseTab(
