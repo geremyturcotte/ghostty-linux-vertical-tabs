@@ -90,4 +90,12 @@ jobs:
       # --- parity gate: scripts/check-none-parity.sh, never called until now ---
 
       - name: check-none-parity.sh
-        run: xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty
+        # A clean, isolated XDG_CONFIG_HOME: the runner's default config dir
+        # can be left in a different state by whichever binary ran first
+        # (e.g. an empty config.ghostty triggers a FileIsEmpty warning),
+        # which would make fork vs. upstream depend on run order instead of
+        # on the sidebar. Both binaries get the same fresh empty config.
+        run: |
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/none-parity-config"
+          mkdir -p "$XDG_CONFIG_HOME"
+          xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty

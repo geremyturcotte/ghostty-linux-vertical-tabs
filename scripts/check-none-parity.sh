@@ -33,8 +33,16 @@ trap 'rm -rf "$tmp"' EXIT
 # about behaviour.
 noise() {
     # grep exits 1 on no match; an empty result is the good case here.
+    #
+    # 'Otherwise, please rebuild in a release mode.' is the CONTINUATION line
+    # of the debug-build warning ('debug build' is the first line, already
+    # filtered). A fork binary built with `zig build` (Debug) compared
+    # against upstream's Release package emits this every run — it says
+    # nothing about the sidebar, so both lines of the same warning must be
+    # filtered together or the pair silently reappears as a false parity
+    # break the next time the wording shifts by a line.
     grep -iE 'CRITICAL|WARNING|assertion' "$1" 2>/dev/null |
-        grep -viE 'debug build|performance will be|GDK_DEBUG|GDK_DISABLE|hsl\(' |
+        grep -viE 'debug build|rebuild in a release mode|performance will be|GDK_DEBUG|GDK_DISABLE|hsl\(' |
         sed 's/0x[0-9a-f]*//g' |
         sort -u || true
 }
