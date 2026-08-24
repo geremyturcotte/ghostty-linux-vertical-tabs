@@ -1774,6 +1774,272 @@ def cmd_none_shortcut():
         return 1
 
 
+def _row_change_ratios(before, after, centers, half_h, col_width=SIDEBAR_COLUMN_WIDTH):
+    """For each row y-center, the fraction of pixels that differ between the
+    two frames within that row's band [cy-half_h, cy+half_h) and inside the
+    sidebar column (x < col_width). Restricting to the column is the same move
+    _column_diff_ratio makes and for the same reason: the terminal on the
+    other side of the split reflows when the active tab changes, and a
+    whole-window count would drown the sidebar's own signal in it. A moving
+    selection highlight is a filled band, so the row it leaves and the row it
+    lands on both light up here while every other row stays quiet -- that
+    two-band signature, not a bare 'something changed', is what the caller
+    reads."""
+    bpx, apx = before.load(), after.load()
+    w = min(col_width, before.width, after.width)
+    h = min(before.height, after.height)
+    ratios = []
+    for cy in centers:
+        y0 = max(0, int(round(cy - half_h)))
+        y1 = min(h, int(round(cy + half_h)))
+        if y1 <= y0:
+            ratios.append(0.0)
+            continue
+        diff = sum(1 for y in range(y0, y1) for x in range(w) if bpx[x, y] != apx[x, y])
+        ratios.append(diff / (w * (y1 - y0)))
+    return ratios
+
+
+def _movers(ratios, floor=0.03, quiet_frac=0.5):
+    """Indices of the rows whose highlight changed between two frames: a row
+    counts as a mover if its change ratio clears `floor` AND is at least
+    1/quiet_frac of the largest quiet row, so a frame where nothing really
+    moved (all ratios small and similar -- the exact fingerprint of the
+    feature being broken, focus never leaving the terminal) yields an empty
+    set rather than a spurious hit."""
+    order = sorted(range(len(ratios)), key=lambda i: ratios[i], reverse=True)
+    movers = [i for i in order if ratios[i] >= floor]
+    return movers
+
+
+def _longest_uniform_run(centers, tol=6):
+    """The longest contiguous subsequence of `centers` whose consecutive gaps
+    are all within `tol` of the run's own step. Tab rows are evenly spaced;
+    terminal text lines picked up by a mis-placed scan band are not, so this is
+    what separates the real rows from noise regardless of where the band fell."""
+    if len(centers) < 2:
+        return centers[:]
+    best = [centers[0]]
+    j = 0
+    n = len(centers)
+    while j < n - 1:
+        step = centers[j + 1] - centers[j]
+        k = j
+        run = [centers[j]]
+        while k < n - 1 and abs((centers[k + 1] - centers[k]) - step) <= tol:
+            run.append(centers[k + 1])
+            k += 1
+        if len(run) > len(best):
+            best = run
+        j = k if k > j else j + 1
+    return best
+
+
+def _detect_tab_rows(img, wh):
+    """Tab-row y-centers, robust to the sidebar's width. The close 'x' button
+    sits at the right edge of each row, and that edge moves with the sidebar
+    width -- ~x165 on an 800px bare-X window, ~x225 on the ~922px WM window --
+    so a single hardcoded band (the reference harness's x216-234) scans the
+    TERMINAL on the narrower window and reads its banner/prompt lines as rows.
+    Scan a range of candidate close-button bands instead and keep the one that
+    yields the longest evenly-spaced run; returns (centers, close_btn_cx)."""
+    best, best_cx = [], None
+    for cx in range(140, 264, 6):
+        run = _longest_uniform_run(_detect_row_bands(img, (cx - 16, cx + 16), (55, wh)))
+        if len(run) > len(best):
+            best, best_cx = run, cx
+    return best, best_cx
+
+
+def cmd_a11y_focus():
+    """The sidebar's keyboard path, measured -- not asserted -- with a
+    positive control in the same run.
+
+    The claim under test: a dedicated accelerator (Ctrl+Shift+L ->
+    win.focus-sidebar) moves keyboard focus into the tab list, where Up/Down
+    move the selection highlight, Enter/Space activate a tab, and Escape hands
+    focus back to the terminal. None of that can be reached with Tab, because
+    the terminal Surface consumes Tab before it reaches the GTK focus chain --
+    an established fact this harness does not re-litigate.
+
+    The observable is which sidebar row is highlighted, read as a frame diff:
+    when the highlight moves from row A to row B, exactly bands A and B change
+    in the sidebar column and every other band stays quiet (rows are visually
+    identical apart from the highlight -- same title, same pwd subtitle). That
+    two-band signature is the measurement.
+
+      POSITIVE CONTROL (same run, must pass or the run refuses to conclude):
+        a mouse click on row 1 versus row 3 -- a known-good gesture -- must
+        produce exactly the {row1, row3} two-band signature. This proves the
+        detector localises a highlight move to the right rows before any
+        keyboard delta measured the same way means anything.
+
+      MEASUREMENT: from a known start (row 3 active), the keyboard alone --
+        Ctrl+Shift+L, Up, Up, Enter -- must land the active tab on row 1,
+        i.e. reproduce the SAME {row1, row3} signature the mouse control
+        produced. If focus never entered the list, those keys reach the
+        terminal instead (arrows move the shell cursor, Enter submits an empty
+        line) and the highlight stays on row 3 -> an all-quiet diff. So the
+        {row1,row3} signature is only reachable if focus entered, arrows
+        navigated, and Enter activated -- the whole chain, proven by its end
+        effect.
+
+      ESCAPE sub-measurement: after Ctrl+Shift+L then one Up (highlight moves
+        3 -> 2 but the tab is NOT activated), Escape must return focus to the
+        terminal and leave the on-screen tab unchanged. Proven by: the frame
+        after Escape matches the pre-navigation frame (highlight back on the
+        live row 3, nothing activated), while the mid frame differed from it.
+        Had Escape instead activated row 2, the after frame would show the
+        highlight on row 2, not back on row 3.
+    """
+    ctrl, shift = 0xFFE3, 0xFFE1  # Control_L, Shift_L
+    KEY_L, KEY_UP, KEY_RETURN = 0x006C, 0xFF52, 0xFF0D
+
+    def send(d, mod_syms, key_sym, hold=0.15, settle=1.0):
+        mod_kcs = [d.keysym_to_keycode(m) for m in mod_syms]
+        key_kc = d.keysym_to_keycode(key_sym)
+        for kc in mod_kcs:
+            xtest.fake_input(d, X.KeyPress, kc)
+        xtest.fake_input(d, X.KeyPress, key_kc)
+        d.sync()
+        time.sleep(hold)
+        xtest.fake_input(d, X.KeyRelease, key_kc)
+        for kc in reversed(mod_kcs):
+            xtest.fake_input(d, X.KeyRelease, kc)
+        d.sync()
+        time.sleep(settle)
+
+    def shot(s, name):
+        img = s.screenshot()
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        img.save(os.path.join(ARTIFACT_DIR, f"a11y-focus-{name}.png"))
+        return img
+
+    s = Session(sidebar_mode="left")
+    try:
+        # The window is driven purely from synthetic input, and Ctrl+Shift+T
+        # (open tab) only lands while the window holds keyboard focus. Focus is
+        # taken by a synthetic CLICK in the window -- what the window manager
+        # honours -- not by set_input_focus/EWMH, which it reverts. Session's
+        # constructor already clicks once; re-assert it here and retry the tab
+        # opening until three real rows exist, so an unlucky focus steal or a
+        # slow first paint can't leave the run under-populated.
+        #
+        # Row geometry is measured, never assumed: the window is 800x600 at
+        # (0,0) under a bare X server (no WM decorations) and ~922x722 under a
+        # WM, so both the row y-centers and the sidebar width differ between
+        # runs. _detect_tab_rows finds the rows by the longest evenly-spaced run
+        # of close-button glyphs, scanning for the band rather than assuming it.
+        # Open tabs one at a time with a re-focus and a settle between each --
+        # batching Ctrl+Shift+T loses one keystroke of two on a slow Debug
+        # build -- until three real rows exist.
+        rows, cx = _detect_tab_rows(s.screenshot(), s.wh)
+        tries = 0
+        while len(rows) < 3 and tries < 8:
+            s.focus_terminal()
+            s.open_tabs(1)
+            time.sleep(1.2)
+            rows, cx = _detect_tab_rows(s.screenshot(), s.wh)
+            tries += 1
+        if len(rows) < 3:
+            raise RuntimeError(
+                f"cmd_a11y_focus: expected >=3 evenly-spaced tab rows, found {len(rows)} "
+                f"({[round(r, 1) for r in rows]}, close-btn cx={cx}) after {tries} "
+                "open-tab attempts")
+        centers = [round(r) for r in rows[:3]]
+        gaps = [rows[i + 1] - rows[i] for i in range(len(rows) - 1)]
+        step = sorted(gaps)[len(gaps) // 2]
+        half_h = step / 2.0
+        # Diff only the left of the sidebar (x<200): a moving selection
+        # highlight fills the row card there, while the close button and the
+        # terminal (x>=200 even on the narrow window) stay out of it -- the
+        # terminal's own content changes when the active tab switches and would
+        # otherwise leak into the row bands.
+        col = 200
+        # Click rows on their LEFT (title) area, never at a fixed x. The
+        # reference harness's ROW1[0]=160 sits right on the close 'x' button on
+        # the narrow 800px window (its button is at x~165), so a "select row"
+        # click there hits the button instead -- same hardcoded-constant trap
+        # the close-button band had. x=40 is in the title text on both windows,
+        # well left of the button (cx>=150), so the click always activates the
+        # row rather than closing it.
+        click_x = 40
+        log(f"a11y-focus: rows at y={centers} step={step} col_width={col} "
+            f"(close-btn cx={cx}, row-click x={click_x})")
+
+        # ---- POSITIVE CONTROL: mouse click row1 vs row3 -> {0,2} signature ----
+        s._click(click_x, centers[0], button=1, settle=0.8)  # activate+highlight row1
+        ctrl_r1 = shot(s, "control-row1")
+        s._click(click_x, centers[2], button=1, settle=0.8)  # activate+highlight row3
+        ctrl_r3 = shot(s, "control-row3")
+
+        ctrl_ratios = _row_change_ratios(ctrl_r1, ctrl_r3, centers, half_h, col)
+        ctrl_movers = _movers(ctrl_ratios)
+        log(f"positive control: mouse row1<->row3 per-row change ratios="
+            f"{[round(r, 4) for r in ctrl_ratios]} movers={ctrl_movers}")
+        if set(ctrl_movers) != {0, 2}:
+            log("POSITIVE CONTROL FAILED — a known-good mouse click on row1 vs row3 did not "
+                "produce the expected {row1,row3} two-band signature; the detector is not "
+                "trustworthy, refusing to report the keyboard result")
+            return 2
+        log("positive control OK: the detector localises a highlight move to exactly the "
+            "clicked rows (row1 and row3), row2 stayed quiet")
+
+        # ---- MEASUREMENT: keyboard Ctrl+Shift+L, Up, Up, Enter -> active=row1 ----
+        # Known start: row3 active + highlighted, focus in the terminal.
+        s._click(click_x, centers[2], button=1, settle=0.8)
+        kbd_base = shot(s, "kbd-base")            # highlight on row3
+        send(s.d, [ctrl, shift], KEY_L)           # focus into the list (cursor on row3)
+        send(s.d, [], KEY_UP)                     # highlight 3 -> 2
+        send(s.d, [], KEY_UP)                     # highlight 2 -> 1
+        send(s.d, [], KEY_RETURN)                 # activate row1, focus back to terminal
+        kbd_after = shot(s, "kbd-after")          # highlight on row1 if the chain worked
+
+        kbd_ratios = _row_change_ratios(kbd_base, kbd_after, centers, half_h, col)
+        kbd_movers = _movers(kbd_ratios)
+        log(f"keyboard nav+activate: base(row3)->after per-row change ratios="
+            f"{[round(r, 4) for r in kbd_ratios]} movers={kbd_movers}")
+        kbd_ok = set(kbd_movers) == {0, 2}
+        if not kbd_ok:
+            log("MEASUREMENT: keyboard path did NOT reproduce the {row1,row3} signature — "
+                "focus/navigation/activation chain is not working (an all-quiet diff means "
+                "focus never left the terminal)")
+
+        # ---- ESCAPE sub-measurement ----
+        s._click(click_x, centers[2], button=1, settle=0.8)  # reset: row3 active
+        esc_base = shot(s, "esc-base")            # highlight row3, focus in terminal
+        send(s.d, [ctrl, shift], KEY_L)           # focus list (cursor row3)
+        send(s.d, [], KEY_UP)                     # highlight 3 -> 2 (NOT activated)
+        esc_mid = shot(s, "esc-mid")
+        s.escape()                                # Escape: focus back to terminal
+        time.sleep(0.6)
+        esc_after = shot(s, "esc-after")
+
+        base_mid = _row_change_ratios(esc_base, esc_mid, centers, half_h, col)
+        base_after = _row_change_ratios(esc_base, esc_after, centers, half_h, col)
+        moved_on_up = _movers(base_mid)           # Up must have moved the highlight (>=1 mover)
+        residual = _movers(base_after)            # after Escape: should be back to base (no movers)
+        log(f"escape: base->mid ratios={[round(r,4) for r in base_mid]} movers={moved_on_up}; "
+            f"base->after ratios={[round(r,4) for r in base_after]} movers={residual}")
+        esc_ok = (len(moved_on_up) >= 1) and (len(residual) == 0)
+        if not esc_ok:
+            log("MEASUREMENT: Escape sub-check FAILED — either Up did not move the highlight "
+                "(moved_on_up empty) or Escape did not return to the pre-navigation state "
+                "(residual non-empty: it activated or stranded the highlight)")
+
+        if kbd_ok and esc_ok:
+            log("a11y-focus: PASS — keyboard alone drove focus into the list, Up navigated, "
+                "Enter activated row1 (matching the mouse positive control's signature), and "
+                "Escape returned focus to the terminal without switching tabs. Captures under "
+                f"{ARTIFACT_DIR}/a11y-focus-*.png")
+            return 0
+        log("a11y-focus: FAIL — see the failing sub-measurement above (positive control "
+            "passed, so the detector is trustworthy and this is a real negative)")
+        return 1
+    finally:
+        s.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hamburger", action="store_true", help="positive control only")
@@ -1789,6 +2055,10 @@ def main():
     ap.add_argument("--panes", action="store_true",
                      help="v1.1 tranche 1: second-level pane rows, with a row-geometry "
                           "positive control and a live active-surface swap round trip")
+    ap.add_argument("--a11y-focus", action="store_true", dest="a11y_focus",
+                     help="sidebar keyboard path: Ctrl+Shift+L focuses the tab list, "
+                          "arrows move the selection, Enter/Space activate, Escape returns "
+                          "focus to the terminal -- with a mouse positive control in the same run")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -1805,6 +2075,8 @@ def main():
         return cmd_drag_reorder()
     if args.panes:
         return cmd_panes()
+    if args.a11y_focus:
+        return cmd_a11y_focus()
 
     ap.print_help()
     return 1
