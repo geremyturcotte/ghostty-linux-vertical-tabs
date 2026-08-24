@@ -48,7 +48,8 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1 xvfb
+          sudo apt-get install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1 xvfb \
+                                  python3-xlib python3-pil
 
       - name: Install Zig 0.15.2
         run: |
@@ -109,3 +110,29 @@ jobs:
 
       - name: check-none-parity.sh
         run: xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty
+
+      # --- interface gate: what check-none-parity.sh structurally CANNOT see ---
+      #
+      # The step above compares LOGS. It returned SUCCESS on a commit where
+      # Ctrl+Shift+B summoned a full sidebar in `gtk-sidebar-tabs=none` --
+      # measured, 2026-08-24, run 32741694702. A log comparison cannot see an
+      # interface defect, so its green proves the fork builds and its tests
+      # pass; it proves NOTHING about `none` parity. That is the most
+      # dangerous of the three states: a reader takes it for an answer.
+      #
+      # This step is the missing measurement, and it is narrow on purpose: it
+      # only answers "is the sidebar really absent when it is disabled?".
+      # Method, with a positive control in the SAME run: press Ctrl+Shift+B in
+      # `left` mode (must change the sidebar column -- else the run refuses to
+      # conclude), then the identical gesture in `none` mode (must change
+      # nothing). The column width is MEASURED from the image, never assumed:
+      # the frozen 260 was read off a window-managed 922x722 window, while
+      # xvfb here gives 800x600 whose sidebar is 202px -- 58px of terminal
+      # would otherwise be counted as sidebar.
+      #
+      # Proven to discriminate, same harness and display, one variable:
+      #   binary before the fix -> exit 1, none-column diff 0.82780
+      #   binary with the fix   -> exit 0, none-column diff 0.00000
+      #   positive control identical in both: column measured x=202, 0.89281
+      - name: none is really inert (interface, not logs)
+        run: xvfb-run --auto-servernum -- python3 scripts/acceptance-harness.py --none-shortcut

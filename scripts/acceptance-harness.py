@@ -948,7 +948,49 @@ def _press_ctrl_shift_b(s):
     time.sleep(1.0)
 
 
-SIDEBAR_COLUMN_WIDTH = 260  # matches cmd_scroll_colour's sidebar-crop convention
+SIDEBAR_COLUMN_WIDTH = 260  # last-resort fallback only -- see _measure_sidebar_column
+
+
+def _measure_sidebar_column(img):
+    """Width, in pixels, of the sidebar's own column -- MEASURED, not assumed.
+
+    The frozen 260 was read once off the ~922x722 window a window manager
+    gives. A bare X server (xvfb, Xephyr -- and CI runs under xvfb) gives an
+    800x600 window whose sidebar is ~202px wide, so 260 spills 58px of
+    TERMINAL into what is supposed to be the sidebar's column. Terminal
+    content changes on its own when the active tab switches, so those 58px
+    can move the ratio in either direction: they can hide a real sidebar
+    change under a tolerance, or invent one where there is none. Same
+    hardcoded-constant trap as the close-button band and ROW1.
+
+    Method, with no colour hardcoded anywhere: take the terminal's background
+    from the image's own RIGHT EDGE (necessarily terminal, in every mode),
+    then walk leftward while each column is still overwhelmingly that colour.
+    Where that stops is the sidebar's right edge. Returns 0 when the terminal
+    reaches the left edge -- i.e. there is NO sidebar at all, which is exactly
+    what `gtk-sidebar-tabs=none` must show."""
+    px = img.load()
+    w, h = img.width, img.height
+    y0, y1 = int(h * 0.55), int(h * 0.95)   # below the tab rows: quiet in both modes
+    if y1 <= y0 or w < 16:
+        return 0
+
+    counts = {}
+    for y in range(y0, y1):
+        c = px[w - 8, y][:3]
+        counts[c] = counts.get(c, 0) + 1
+    term_bg = max(counts.items(), key=lambda kv: kv[1])[0]
+
+    span = y1 - y0
+
+    def is_terminal(x):
+        n = sum(1 for y in range(y0, y1) if px[x, y][:3] == term_bg)
+        return n > 0.9 * span
+
+    x = w - 8
+    while x > 0 and is_terminal(x - 1):
+        x -= 1
+    return x
 
 
 def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
@@ -968,7 +1010,7 @@ def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
     return diff / total if total else 0.0
 
 
-def _shortcut_column_diff(sidebar_mode, label):
+def _shortcut_column_diff(sidebar_mode, label, col_width=None):
     """Launch `sidebar_mode`, screenshot, press Ctrl+Shift+B, screenshot
     again, and return the sidebar-column diff ratio between the two."""
     s = Session(sidebar_mode=sidebar_mode)
@@ -988,9 +1030,13 @@ def _shortcut_column_diff(sidebar_mode, label):
     finally:
         s.close()
 
-    ratio = _column_diff_ratio(before, after)
-    log(f"{label}: sidebar-column(x<{SIDEBAR_COLUMN_WIDTH}) diff_ratio={ratio:.5f}")
-    return ratio
+    measured = _measure_sidebar_column(before)
+    ratio = _column_diff_ratio(before, after, col_width=col_width or measured
+                               or SIDEBAR_COLUMN_WIDTH)
+    used = col_width or measured or SIDEBAR_COLUMN_WIDTH
+    log(f"{label}: sidebar column MEASURED at x={measured} "
+        f"(diff taken over x<{used}) diff_ratio={ratio:.5f}")
+    return ratio, measured
 
 
 UPSTREAM_BIN = "/usr/bin/ghostty"
@@ -1205,15 +1251,33 @@ def cmd_none_shortcut():
     CHANGE_THRESHOLD = 0.05  # a sidebar appearing/disappearing swamps this in a 260px-wide column
     NOOP_THRESHOLD = 0.005  # cursor blink / AA jitter tolerance
 
-    left_ratio = _shortcut_column_diff("left", "left-control")
+    left_ratio, left_col = _shortcut_column_diff("left", "left-control")
+    if not left_col:
+        log("POSITIVE CONTROL FAILED — no sidebar column found in `left` mode; "
+            "the column detector itself is blind, so no `none` verdict is publishable")
+        return 2
     if left_ratio < CHANGE_THRESHOLD:
         log(f"POSITIVE CONTROL FAILED — left mode sidebar-column diff_ratio={left_ratio:.5f} "
             f"< {CHANGE_THRESHOLD}; refusing to conclude anything about `none` mode")
         return 2
     log(f"positive control OK: left mode sidebar-column diff_ratio={left_ratio:.5f} (sidebar toggled)")
 
-    log("measuring `none` mode: Ctrl+Shift+B must be a no-op")
-    none_ratio = _shortcut_column_diff("none", "none-mode")
+    # Reuse the width MEASURED in `left`: in `none` there is (correctly) no
+    # sidebar to measure, and the question is precisely whether anything
+    # appears in the band a sidebar would occupy.
+    log(f"measuring `none` mode over the band `left` actually occupied (x<{left_col})")
+    none_ratio, none_col = _shortcut_column_diff("none", "none-mode", col_width=left_col)
+    # A few pixels at the left edge are the window border, not a sidebar.
+    # Measured: a real sidebar is 202px against a 202px left-mode column; the
+    # bare border reads 5px. Require a quarter of the control's width before
+    # calling it a sidebar, so this check can only fire on something real.
+    if none_col > left_col // 4:
+        log(f"none: a sidebar column is present AT REST (x={none_col}, "
+            f"vs {left_col} in left mode) — the sidebar is NOT absent in none mode")
+        return 1
+    if none_col:
+        log(f"none: {none_col}px at the left edge — window border, not a sidebar "
+            f"(left mode measures {left_col})")
     no_effect = none_ratio < NOOP_THRESHOLD
     log(f"none: sidebar-column diff_ratio={none_ratio:.5f} no_effect={no_effect}")
 
