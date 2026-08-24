@@ -37,8 +37,11 @@ produced the false "NOT MEASURABLE" verdicts below on PR #9. This harness
 detects popovers by diffing the X window tree before/after a click (new
 **and** remapped windows — GTK reuses popover surfaces on the 2nd+ open), and
 always runs the hamburger menu as a positive control in the same run before
-trusting any negative. Each mode launches its own isolated ghostty process
-and prints the popover's X window id plus a PNG under
+trusting any negative — that control requires a popup at least 200×200 (the
+real menu is 349×662), not just any override-redirect window, since a bare
+size-floor accepts the "Menu principal" tooltip GTK can show without the menu
+itself ever opening. Each mode launches its own isolated ghostty process and
+prints the popover's X window id plus a PNG under
 `.prokai/tmp/dispatch-artifacts/` (gitignored, regenerated per run).
 
 ## Regression — the escape hatch
@@ -265,7 +268,24 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       top with synthetic mouse-wheel events — this recycles rows 1-3's list
       widgets to render rows 4-6 and back, which is exactly the case that
       would expose colour state living on the recycled widget instead of the
-      tab model. After the round trip, row 1 is still red and row 2 is still
-      blue (screenshots: `.prokai/tmp/dispatch-artifacts/task11-coloured-before-scroll.png`,
-      `task11-after-scroll-recycle.png`). **`PROGRESS.md`'s Task 11 line
-      ("Per-tab colour marks — ✅ done, verified on screen") is corroborated.**
+      tab model.
+
+      What the check actually verifies, precisely: it locates the y-center of
+      the reddish and blueish pixels in the post-scroll screenshot and
+      requires the red center to fall inside row 1's expected y-band
+      (measured row height ± 25px tolerance, to absorb the ~13px drift
+      observed between the pre-scroll and post-"scroll to top" layouts) *and*
+      the blue center inside row 2's band *and* neither colour present at all
+      in the other row's band. An earlier version of this check only tested
+      "is there a reddish pixel anywhere in the sidebar column, and a blueish
+      one anywhere" — that version would have reported PASS unchanged even if
+      the scroll had swapped the two colours onto each other's rows, which is
+      exactly the failure this test case exists to catch (an independent
+      review of the committed harness caught this). The band-restricted
+      version was verified to still report PASS against the same recorded
+      run (screenshots: `.prokai/tmp/dispatch-artifacts/task11-coloured-before-scroll.png`,
+      `task11-after-scroll-recycle.png`; measured in that run: red center
+      y=132.5 inside row 1's band, blue center y=186.5 inside row 2's band,
+      no red in row 2's band, no blue in row 1's band). **`PROGRESS.md`'s
+      Task 11 line ("Per-tab colour marks — ✅ done, verified on screen") is
+      corroborated.**

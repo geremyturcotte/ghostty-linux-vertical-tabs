@@ -40,6 +40,7 @@ ARTIFACT_DIR = os.path.join(REPO_ROOT, ".prokai", "tmp", "dispatch-artifacts")
 # Coordinates measured on the 922x722 reference window (docs/acceptance.md).
 ROW1 = (160, 133)
 HAMBURGER = (724, 78)
+HAMBURGER_MIN_SIZE = (200, 200)  # the real menu is 349x662; a "Menu principal" tooltip is 121x32
 TAB_OVERVIEW = (690, 78)  # negative control: in-window, opens 0 new X windows
 TERMINAL_FOCUS = (600, 300)
 
@@ -148,12 +149,22 @@ class Session:
         self.d.sync()
         time.sleep(0.8)
 
-    def probe_click(self, rx, ry, button, label, settle=2.0, dismiss=True):
+    def probe_click(self, rx, ry, button, label, settle=2.0, dismiss=True, min_size=None):
         """Click at (rx, ry) relative to the window origin; diff the X tree;
         capture + save the PNG of any override-redirect popup found. By
         default sends Escape afterward to close it -- pass dismiss=False when
         the caller needs the popup to stay open for further clicks (e.g. to
-        navigate into a submenu), since Escape would close it first."""
+        navigate into a submenu), since Escape would close it first.
+
+        Among multiple new/remapped override-redirect windows (a click can
+        also produce a tooltip alongside the real popup, or vice-versa), picks
+        the LARGEST by area, not an arbitrary one -- iterating a set() gives
+        no ordering guarantee. Pass min_size=(w, h) to additionally require
+        the chosen popover be at least that big; this matters for the
+        hamburger-menu positive control specifically, since a bare
+        w>20,h>20 filter is satisfied by a "Menu principal" tooltip
+        (121x32) that can appear without the 349x662 menu ever having
+        opened -- a control that tolerates a tooltip isn't a control."""
         before = self.snap()
         self._click(rx, ry, button, settle)
         after = self.snap()
@@ -173,9 +184,18 @@ class Session:
         log(f"{label}: btn{button} @({rx},{ry}) -> nouvelles={len(new_ids)} remappees={len(remapped_ids)} "
             f"popovers={len(popovers)}")
 
+        candidates = popovers
+        if min_size is not None:
+            min_w, min_h = min_size
+            candidates = [t for t in popovers if t[2] >= min_w and t[3] >= min_h]
+            if not candidates and popovers:
+                log(f"{label}: {len(popovers)} popover(s) seen but none met min_size={min_size} "
+                    f"(largest was {max(popovers, key=lambda t: t[2]*t[3])[2]}x{max(popovers, key=lambda t: t[2]*t[3])[3]}) "
+                    "-- treating as no real popup")
+
         result = None
-        if popovers:
-            (wid, nm, w, h, x, y, orr, ms) = popovers[0]
+        if candidates:
+            (wid, nm, w, h, x, y, orr, ms) = max(candidates, key=lambda t: t[2] * t[3])
             os.makedirs(ARTIFACT_DIR, exist_ok=True)
             out_path = os.path.join(ARTIFACT_DIR, f"{label}-0x{wid:x}.png")
             pw = self.d.create_resource_object("window", wid)
@@ -225,7 +245,7 @@ class Session:
         Uses dismiss=False on the menu-open click: probe_click's default
         Escape-after-capture would otherwise close the menu before this
         method can click into it."""
-        ctrl = self.probe_click(*HAMBURGER, button=1, label=f"{label}-ctrl")
+        ctrl = self.probe_click(*HAMBURGER, button=1, label=f"{label}-ctrl", min_size=HAMBURGER_MIN_SIZE)
         if ctrl is None:
             raise RuntimeError(f"positive control failed before colouring {label}")
 
@@ -258,7 +278,7 @@ class Session:
 def cmd_hamburger():
     s = Session()
     try:
-        result = s.probe_click(*HAMBURGER, button=1, label="hamburger")
+        result = s.probe_click(*HAMBURGER, button=1, label="hamburger", min_size=HAMBURGER_MIN_SIZE)
         if result is None:
             log("POSITIVE CONTROL FAILED")
             return 2
@@ -271,7 +291,7 @@ def cmd_hamburger():
 def cmd_menu():
     s = Session()
     try:
-        ctrl = s.probe_click(*HAMBURGER, button=1, label="hamburger-control")
+        ctrl = s.probe_click(*HAMBURGER, button=1, label="hamburger-control", min_size=HAMBURGER_MIN_SIZE)
         if ctrl is None:
             log("POSITIVE CONTROL FAILED — refusing to report the row-menu result")
             return 2
@@ -347,13 +367,24 @@ def cmd_scroll_colour():
         img.save(after_shot)
         log(f"task11: scrolled to bottom and back to top (forces row-widget recycling) -> {after_shot}")
 
-        # Scan the sidebar column for the colour-dot pixels rather than
-        # trusting fixed coordinates: the scroll position after "back to
-        # top" isn't guaranteed to land row 1 at the exact same y every run
-        # (GTK may leave a partial row visible depending on prior selection),
-        # so a fixed-pixel sample is fragile. A reddish or blueish pixel
-        # anywhere in the sidebar column (x < 260) is unambiguous: no other
-        # UI chrome in this app uses saturated red/blue.
+        # Finding "a red pixel somewhere" and "a blue pixel somewhere" is not
+        # the criterion under test: the criterion is "colour state lives on
+        # the row/tab, not on the recycled widget" -- so a red dot that
+        # migrated onto row 2 (or swapped with row 2's blue) must FAIL, not
+        # be waved through because red and blue both still exist on screen
+        # somewhere. Require each colour's y-center to fall within its own
+        # row's band, and require it NOT to fall within the other row's band
+        # (catches a partial swap). ROW_STEP_Y is measured on the pre-resize,
+        # pre-scroll layout; after "scroll to top" the observed row spacing
+        # has drifted somewhat (measured 54px vs the nominal 66px in one
+        # captured run), so the band is wide (+/-25px) to absorb that rather
+        # than assume exact pixel reproduction across window states.
+        BAND_TOLERANCE = 25
+
+        def band(row_index):
+            center = ROW1[1] + row_index * ROW_STEP_Y
+            return (center - BAND_TOLERANCE, center + BAND_TOLERANCE)
+
         def is_reddish(px):
             r, gr, b = px[:3]
             return r > 180 and gr < 160 and b < 160
@@ -362,17 +393,35 @@ def cmd_scroll_colour():
             r, gr, b = px[:3]
             return b > 180 and r < 160
 
-        sidebar = img.crop((0, 0, min(260, g.width), g.height))
-        pixels = sidebar.load()
-        row1_ok = any(is_reddish(pixels[x, y]) for x in range(sidebar.width) for y in range(sidebar.height))
-        row2_ok = any(is_blueish(pixels[x, y]) for x in range(sidebar.width) for y in range(sidebar.height))
-        log(f"task11: red dot found={row1_ok} blue dot found={row2_ok}")
-        if row1_ok and row2_ok:
-            log("task11: PASS — colour survives scroll-induced row recycling "
-                "(row 1 still red, row 2 still blue)")
+        def colour_ys(pred):
+            sidebar = img.crop((0, 0, min(260, g.width), g.height))
+            pixels = sidebar.load()
+            return [y for y in range(sidebar.height) for x in range(sidebar.width) if pred(pixels[x, y])]
+
+        red_ys = colour_ys(is_reddish)
+        blue_ys = colour_ys(is_blueish)
+        red_center = sum(red_ys) / len(red_ys) if red_ys else None
+        blue_center = sum(blue_ys) / len(blue_ys) if blue_ys else None
+        log(f"task11: red pixel y-range={(min(red_ys), max(red_ys)) if red_ys else None} center={red_center}")
+        log(f"task11: blue pixel y-range={(min(blue_ys), max(blue_ys)) if blue_ys else None} center={blue_center}")
+
+        row1_band, row2_band = band(0), band(1)
+        red_in_row1_band = red_center is not None and row1_band[0] <= red_center <= row1_band[1]
+        blue_in_row2_band = blue_center is not None and row2_band[0] <= blue_center <= row2_band[1]
+        no_red_in_row2_band = not any(row2_band[0] <= y <= row2_band[1] for y in red_ys)
+        no_blue_in_row1_band = not any(row1_band[0] <= y <= row1_band[1] for y in blue_ys)
+
+        log(f"task11: row1_band={row1_band} row2_band={row2_band} "
+            f"red_in_row1={red_in_row1_band} blue_in_row2={blue_in_row2_band} "
+            f"no_red_in_row2={no_red_in_row2_band} no_blue_in_row1={no_blue_in_row1_band}")
+
+        if red_in_row1_band and blue_in_row2_band and no_red_in_row2_band and no_blue_in_row1_band:
+            log("task11: PASS — red stayed on row 1's band and blue on row 2's band after "
+                "scroll-induced row recycling; neither colour migrated or swapped rows")
             return 0
         else:
-            log(f"task11: FAIL — colour lost after scroll recycling (row1_ok={row1_ok}, row2_ok={row2_ok})")
+            log("task11: FAIL — a colour is missing from its expected row's band, or present "
+                "in the other row's band (recycling put colour on the wrong row)")
             return 1
     finally:
         s.close()
