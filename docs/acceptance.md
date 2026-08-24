@@ -49,7 +49,11 @@ shortcut) that `scripts/check-none-parity.sh` structurally cannot, since
 that script only diffs GTK/GLib log output, never a pixel. It reuses the
 positive-control pattern (measuring `left` mode first, in the same run, to
 prove the pixel-based signals actually discriminate a sidebar-present state)
-and does not modify or replace `check-none-parity.sh`.
+and does not modify or replace `check-none-parity.sh`. It refuses to launch
+on top of a still-running instance of the same binary (a stray one skews
+window placement for the next launch and produced one flaky reading during
+review), and re-measures its pixel signals until two consecutive readings
+agree rather than trusting a single screenshot after a fixed sleep.
 
 Each mode launches its own isolated ghostty process and prints its evidence
 (a popover's X window id, or a structural pixel measurement) plus PNGs under

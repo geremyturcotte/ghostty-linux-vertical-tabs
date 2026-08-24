@@ -55,7 +55,36 @@ def log(msg):
     print(f"[harness] {msg}", flush=True)
 
 
+def _wait_for_no_stray_ghostty(timeout=8.0):
+    """Refuse to launch on top of a still-running instance of this exact
+    binary. A stray process from a prior run (this harness's own cleanup
+    failing to land in time, or a previous invocation killed mid-run) makes
+    the window manager place the new window at an offset from the expected
+    origin -- observed directly: abs=(139,177) instead of (89,127), with the
+    sidebar not yet fully painted, which produced one flaky positive-control
+    reading (prompt_text_x=117 instead of ~317). The positive control caught
+    that flake and correctly refused to trust the result, but the fix
+    belongs here, at the root cause, not just in the guard that noticed it."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            r = subprocess.run(["pgrep", "-f", GHOSTTY_BIN], capture_output=True, text=True)
+        except FileNotFoundError:
+            return  # no pgrep available -- can't check, proceed as before
+        pids = [p for p in r.stdout.split() if p]
+        if not pids:
+            return
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"refusing to launch: {GHOSTTY_BIN} already running (pid {', '.join(pids)}) "
+                f"after waiting {timeout}s -- a stray instance from a prior run skews window "
+                "placement for the new one. Kill it and retry."
+            )
+        time.sleep(0.5)
+
+
 def launch_ghostty(extra_config="", sidebar_mode="left"):
+    _wait_for_no_stray_ghostty()
     env = dict(os.environ)
     env["GDK_BACKEND"] = "x11"
     env["DISPLAY"] = env.get("DISPLAY", ":0")
@@ -474,42 +503,76 @@ def _find_prompt_row(img, y0=100, y1=250, x_scan=(0, 900), thresh=150, min_count
     return None
 
 
-def _measure_mode(sidebar_mode, label):
-    """Launch one mode with 2 tabs, screenshot, and return the two structural
-    signals: prompt_x (sidebar-column occupancy) and chrome_band (whether a
+def _snapshot_signals(s):
+    """One screenshot -> (img, prompt_y, prompt_x, dominant_band_colour, chrome_band)."""
+    raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+    img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+
+    prompt_y = _find_prompt_row(img)
+    prompt_x = _prompt_text_x(img, prompt_y) if prompt_y is not None else None
+
+    # Sample the row-bar band (y=100-140, the AdwTabBar's expected position
+    # measured on the reference window) on the terminal side (x=460-900,
+    # clear of any sidebar column regardless of mode) and check whether the
+    # dominant colour there is chrome-grey (tab bar present) or
+    # terminal-background-blue (no tab bar, content already started).
+    px = img.load()
+    colour_counts = {}
+    for y in range(100, 140):
+        for x in range(460, min(900, s.ww)):
+            c = px[x, y][:3]
+            colour_counts[c] = colour_counts.get(c, 0) + 1
+    dominant = max(colour_counts, key=colour_counts.get)
+    chrome_band = _looks_like_chrome(dominant)
+
+    return img, prompt_y, prompt_x, dominant, chrome_band
+
+
+def _measure_mode(sidebar_mode, label, max_polls=10, poll_interval=0.5):
+    """Launch one mode with 2 tabs and return the two structural signals:
+    prompt_x (sidebar-column occupancy) and chrome_band (whether a
     horizontal tab-bar-style chrome row sits between the headerbar and the
-    terminal)."""
+    terminal).
+
+    Polls (screenshot, remeasure) until two consecutive readings agree,
+    instead of a single screenshot after a fixed sleep -- a fixed sleep was
+    observed to read a not-yet-painted frame once (positive control on
+    `left` mode returned prompt_text_x=117 instead of ~317, when a stray
+    ghostty process from a prior run had shifted this run's window off its
+    expected placement and delayed its first paint). The positive control
+    caught that flake and refused to trust the run, which is what it's for,
+    but re-measuring until the signal stops changing removes the flake at
+    the source rather than only detecting it after the fact."""
     s = Session(sidebar_mode=sidebar_mode)
     try:
         s.open_tabs(1)  # 2 tabs total
         time.sleep(0.5)
-        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
-        img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+
+        prev = None
+        img = prompt_y = prompt_x = dominant = chrome_band = None
+        settled = False
+        for attempt in range(1, max_polls + 1):
+            img, prompt_y, prompt_x, dominant, chrome_band = _snapshot_signals(s)
+            cur = (prompt_x, chrome_band)
+            if cur == prev:
+                settled = True
+                break
+            prev = cur
+            time.sleep(poll_interval)
+
+        if not settled:
+            log(f"{label}: WARNING — signal did not settle across {max_polls} polls "
+                f"({max_polls * poll_interval:.1f}s); using the last reading anyway")
+
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
         shot_path = os.path.join(ARTIFACT_DIR, f"none-parity-{label}.png")
         img.save(shot_path)
 
-        prompt_y = _find_prompt_row(img)
-        prompt_x = _prompt_text_x(img, prompt_y) if prompt_y is not None else None
-
-        # Sample the row-bar band (y=100-140, the AdwTabBar's expected
-        # position measured on the reference window) on the terminal side
-        # (x=460-900, clear of any sidebar column regardless of mode) and
-        # check whether the dominant colour there is chrome-grey (tab bar
-        # present) or terminal-background-blue (no tab bar, content already
-        # started).
-        px = img.load()
-        colour_counts = {}
-        for y in range(100, 140):
-            for x in range(460, min(900, s.ww)):
-                c = px[x, y][:3]
-                colour_counts[c] = colour_counts.get(c, 0) + 1
-        dominant = max(colour_counts, key=colour_counts.get)
-        chrome_band = _looks_like_chrome(dominant)
-
-        log(f"{label}: prompt_row_y={prompt_y} prompt_text_x={prompt_x} "
-            f"tab-bar-band dominant colour={dominant} chrome_like={chrome_band} -> {shot_path}")
-        return {"prompt_x": prompt_x, "chrome_band": chrome_band, "shot": shot_path}
+        log(f"{label}: settled after {attempt} poll(s), prompt_row_y={prompt_y} "
+            f"prompt_text_x={prompt_x} tab-bar-band dominant colour={dominant} "
+            f"chrome_like={chrome_band} -> {shot_path}")
+        return {"prompt_x": prompt_x, "chrome_band": chrome_band, "shot": shot_path,
+                "settled": settled, "window_width": s.ww}
     finally:
         s.close()
 
@@ -529,21 +592,37 @@ def cmd_none_parity():
     than just returning "absent" unconditionally."""
     log("positive control: measuring `left` mode (sidebar expected present, no tab bar)")
     left = _measure_mode("left", "left-control")
+    if not left["settled"]:
+        log("POSITIVE CONTROL FAILED — signal never settled across the poll cap; "
+            "refusing to trust an unsettled reading even if it looked plausible")
+        return 2
     if left["prompt_x"] is None:
         log("POSITIVE CONTROL FAILED — could not even locate `left` mode's terminal prompt")
         return 2
-    if not (left["prompt_x"] > 150 and not left["chrome_band"]):
+    # A pixel-absolute threshold only holds for the one window width this
+    # harness happens to launch at; normalize to a fraction of the measured
+    # window width instead so this keeps working if that ever changes. The
+    # sidebar column measures ~260/922 (~28%) of the reference window; the
+    # threshold sits well below that, at 16%, with margin on both sides
+    # (no-sidebar prompts land near 0-16%, sidebar-present prompts near 28%+).
+    no_sidebar_x_threshold = left["window_width"] * 0.16
+    if not (left["prompt_x"] > no_sidebar_x_threshold and not left["chrome_band"]):
         log(f"POSITIVE CONTROL FAILED — `left` mode did not show the expected sidebar signal "
-            f"(prompt_x={left['prompt_x']}, chrome_band={left['chrome_band']}); "
-            "refusing to trust the `none` measurement below")
+            f"(prompt_x={left['prompt_x']}, threshold={no_sidebar_x_threshold:.0f}, "
+            f"chrome_band={left['chrome_band']}); refusing to trust the `none` measurement below")
         return 2
     log(f"positive control OK: left mode prompt_x={left['prompt_x']} (sidebar occupies the column), "
         f"chrome_band={left['chrome_band']} (no tab bar)")
 
     log("measuring `none` mode")
     none = _measure_mode("none", "none-mode")
+    if not none["settled"]:
+        log("MEASUREMENT FAILED — `none` mode's signal never settled across the poll cap; "
+            "refusing to report a verdict from an unsettled reading")
+        return 2
 
-    no_sidebar = none["prompt_x"] is not None and none["prompt_x"] < 150
+    no_sidebar_x_threshold = none["window_width"] * 0.16
+    no_sidebar = none["prompt_x"] is not None and none["prompt_x"] < no_sidebar_x_threshold
     tab_bar_present = none["chrome_band"] is True
     log(f"none: no_sidebar={no_sidebar} (prompt_x={none['prompt_x']}) "
         f"tab_bar_present={tab_bar_present} (chrome_band={none['chrome_band']})")
