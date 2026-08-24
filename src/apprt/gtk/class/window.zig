@@ -1916,6 +1916,13 @@ pub const Window = extern struct {
         self: *Self,
     ) callconv(.c) void {
         const priv = self.private();
+
+        // gtk-sidebar-tabs = none must leave upstream behaviour untouched —
+        // the sidebar and its toggle are inert on this path (see syncSidebar).
+        if (priv.config) |v| {
+            if (v.get().@"gtk-sidebar-tabs" == .none) return;
+        }
+
         const showing = priv.split_view.getShowSidebar() != 0;
         priv.split_view.setShowSidebar(@intFromBool(!showing));
     }
