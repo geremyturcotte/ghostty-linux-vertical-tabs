@@ -26,3 +26,6 @@ glad.zip
 
 vgcore.*
 
+__pycache__/
+.prokai/
+

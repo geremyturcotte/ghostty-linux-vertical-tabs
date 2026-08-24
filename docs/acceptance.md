@@ -23,6 +23,24 @@ Diffs the fork's `none` mode against upstream's GTK/GLib warnings and asserts
 `left`/`right` emit no CRITICAL. It exists because the `none` promise has been
 broken twice, and nothing but a human reading a log ever caught it.
 
+## Popover harness (XTEST)
+
+```bash
+.xvenv/bin/python3 scripts/acceptance-harness.py --hamburger      # positive control only
+.xvenv/bin/python3 scripts/acceptance-harness.py --menu           # Task 9: row context menu
+.xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour  # Task 11: colour + scroll
+```
+
+A GTK4 popover on X11 is a separate override-redirect X window, not a region
+of the parent — screenshotting the parent misses it every time, which is what
+produced the false "NOT MEASURABLE" verdicts below on PR #9. This harness
+detects popovers by diffing the X window tree before/after a click (new
+**and** remapped windows — GTK reuses popover surfaces on the 2nd+ open), and
+always runs the hamburger menu as a positive control in the same run before
+trusting any negative. Each mode launches its own isolated ghostty process
+and prints the popover's X window id plus a PNG under
+`.prokai/tmp/dispatch-artifacts/` (gitignored, regenerated per run).
+
 ## Regression — the escape hatch
 
 `none` is the one promise this fork makes unconditionally. It has already been
@@ -162,22 +180,24 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       the active tab; the sidebar highlight moved to match. Confirmed working.
 - [ ] Drag a tab out into its own window: neither window crashes and both
       sidebars are correct. This is the path the `notify::selected-page` guards
-      exist for. **NOT MEASURABLE BY THIS HARNESS.** Attempted twice: once
-      confounded by the queued-click backlog above (inconclusive), and once
-      cleanly — a proper `ButtonPress` on a row, seven `MotionNotify` steps out
-      past the window's right/bottom edge with waits between each, then
-      `ButtonRelease` 1.1s later. No second window appeared either time, and
-      the sidebar was left untouched (no crash, no stray reorder). GTK4's
-      tab-tear-off is driven by the toolkit's own drag-gesture recognizer
-      (`AdwTabView`'s internal `GtkDragSource`/`GtkDropTarget` machinery), not
-      a plain button-down + move + button-up sequence — XTEST can synthesize
-      the latter but I have no way to confirm it satisfies the former's grab
-      and threshold semantics. Given the false negatives already found and
-      corrected earlier in this same run (the tab-overview button, the OSC
-      title, the bell), I do **not** trust a clean negative here as proof of
-      absence — I can't rule out either "the harness can't trigger this" or
-      "it's genuinely broken," and calling it either would be a guess. Left
-      unchecked. Needs a human with a real mouse.
+      exist for. **NOT MEASURABLE BY THIS HARNESS — confirmed a distinct gap
+      from the popover false negative, not the same bug.** The Task 9/11
+      false negatives above turned out to share one root cause: screenshotting
+      the parent window instead of diffing the X tree for the popover's own
+      override-redirect window, now fixed in `scripts/acceptance-harness.py`.
+      This item was re-examined against that fix and is **not** the same
+      failure — a click-and-drag doesn't spawn any new or remapped
+      override-redirect X window to detect in the first place (confirmed:
+      running the harness's `snap()`/diff during a synthetic drag attempt
+      shows no popover-shaped window at all, new or remapped). GTK4's
+      tab-tear-off is driven by `AdwTabView`'s internal
+      `GtkDragSource`/`GtkDropTarget` drag-gesture recognizer, which needs a
+      real grab-and-threshold sequence a plain XTEST `ButtonPress` +
+      `MotionNotify` steps + `ButtonRelease` isn't confirmed to satisfy — an
+      X-tree diff can't help either way since the feature under test isn't a
+      popover. Still needs a human with a real mouse, or a harness that can
+      verify GTK's drag-gesture state directly (e.g. via GTK inspector/AT-SPI)
+      rather than X-tree diffing. Left unchecked.
 - [x] Close the last tab: the window closes cleanly. **Measured**: closed the
       2nd-to-last row's `×`, confirmed 1 row remained; closed that last row's
       `×`; the process exited fully within ~1s (`ps aux` showed nothing), no
@@ -214,33 +234,38 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       row (not freshly created), running `cd /tmp` live-updated both the
       window title and that same row's title/subtitle from "arrow-keys" to
       "/tmp" / "tmp" without needing a new tab or a reselect.
-- [ ] Right-click → Colour → Red marks the row. **NOT MEASURABLE BY THIS
-      HARNESS**, and I want to be precise about why given how much latency
-      already fooled me once this run (see the tab-overview note above).
-      This is not that: I retried right-click twice, cleanly, each with an
-      explicit `d.sync()` and up to 1.5s settle before screenshotting — the
-      same generous-settle recipe that *did* eventually reveal the
-      tab-overview button working. Both retries showed nothing. I then ran a
-      control in a completely different location — right-clicking bare
-      terminal space, which upstream Ghostty normally answers with its own
-      copy/paste context menu — and got the same silence. Left-click, by
-      contrast, worked everywhere I tried it, every time, throughout this
-      entire sweep. So this isn't a stale-frame artifact; XTEST's synthesized
-      button-3 events simply never produced a popup for me, in either the
-      sidebar's custom menu or Ghostty's own built-in one. That symmetry makes
-      me suspect a GTK4 popup-grab/seat-state requirement that synthetic X11
-      button events don't satisfy, rather than something specific to this
-      fork's row menu — but I have no way to confirm that theory without a
-      real pointer, so I won't report it as either "works" or "broken."
-      **This directly bears on `docs/PROGRESS.md`'s Task 9 line** ("Right-click
-      menu on rows — ✅ done, verified on screen"): I can neither corroborate
-      nor contradict that claim. My inability to reach it says more about this
-      harness's reach than about the feature. Needs a human with a real mouse.
-- [ ] With ~6 tabs, colour two, then scroll the list: the colours stay on the
+- [x] Right-click → Colour → Red marks the row. **Measured** (root cause of
+      the earlier "NOT MEASURABLE" verdict found and fixed — see
+      `scripts/acceptance-harness.py --menu`): the previous attempt's
+      detector was wrong, not the input. A GTK4 popover on X11 opens as a
+      *separate* override-redirect X window; screenshotting the parent
+      window (what the earlier attempt did) can never show it, no matter how
+      long you wait. XTEST's synthetic button-3 *was* opening the menu the
+      whole time. Detecting by diffing `root.query_tree()` before/after the
+      click (counting windows that are new **or** remapped to `IsViewable` —
+      GTK reuses the popover surface after the first open, so only "new"
+      undercounts from the 2nd run on) finds it every time: right-clicking
+      row 1 opens a 276×156 override-redirect window at a fixed offset from
+      the click, containing "Changer le titre de l'onglet…" / "Colour" /
+      "Fermer l'onglet". A same-run hamburger-menu positive control (opens a
+      349×662 menu) confirms popovers are reachable at all before trusting
+      this result. Clicking "Colour" resizes that same popover window in
+      place (276×156 → 276×252) to show None/Blue/Green/Orange/Red; clicking
+      Red visibly marks the row with a red dot. **`docs/PROGRESS.md`'s Task 9
+      line ("Right-click menu on rows — ✅ done, verified on screen") is
+      corroborated.**
+- [x] With ~6 tabs, colour two, then scroll the list: the colours stay on the
       right tabs. Rows are recycled, so this is the case that would expose
-      colour state living on the row instead of the page. **NOT MEASURABLE BY
-      THIS HARNESS** — blocked on the item above: there is no way to set a
-      row's colour without the right-click menu this harness can't open, so
-      there is nothing to test scroll-persistence *of*. Also bears on
-      `PROGRESS.md`'s Task 11 line ("Per-tab colour marks — ✅ done, verified
-      on screen") the same way: not corroborated, not contradicted.
+      colour state living on the row instead of the page. **Measured, PASS**
+      (`scripts/acceptance-harness.py --scroll-colour`): opened 6 tabs,
+      coloured row 1 red and row 2 blue via the now-working row menu, then
+      shrank the window (a raw `ConfigureWindow` resize, not XTEST — see the
+      script's docstring on `cmd_scroll_colour` for why) so the 6-row list
+      no longer fits and must scroll. Scrolled to the bottom and back to the
+      top with synthetic mouse-wheel events — this recycles rows 1-3's list
+      widgets to render rows 4-6 and back, which is exactly the case that
+      would expose colour state living on the recycled widget instead of the
+      tab model. After the round trip, row 1 is still red and row 2 is still
+      blue (screenshots: `.prokai/tmp/dispatch-artifacts/task11-coloured-before-scroll.png`,
+      `task11-after-scroll-recycle.png`). **`PROGRESS.md`'s Task 11 line
+      ("Per-tab colour marks — ✅ done, verified on screen") is corroborated.**
