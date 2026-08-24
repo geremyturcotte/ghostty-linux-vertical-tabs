@@ -14,8 +14,13 @@ name: Fork CI
 # Runs on ubuntu-latest only. Never touches test.yml, nix.yml, flatpak.yml, or
 # update-colorschemes.yml — this file is the only surface a rebase can conflict
 # on, and it conflicts on nothing because nothing upstream references it.
+# github.ref is refs/heads/<branch> on push but refs/pull/<n>/merge on
+# pull_request — two different groups for the same commit, so push and
+# pull_request runs never dedupe against each other. head_ref is only set on
+# pull_request; falling back to ref covers push. Measured: without this,
+# every commit ran the full ~10min build twice in parallel.
 concurrency:
-  group: fork-ci-${{ github.ref }}
+  group: fork-ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -90,12 +95,4 @@ jobs:
       # --- parity gate: scripts/check-none-parity.sh, never called until now ---
 
       - name: check-none-parity.sh
-        # A clean, isolated XDG_CONFIG_HOME: the runner's default config dir
-        # can be left in a different state by whichever binary ran first
-        # (e.g. an empty config.ghostty triggers a FileIsEmpty warning),
-        # which would make fork vs. upstream depend on run order instead of
-        # on the sidebar. Both binaries get the same fresh empty config.
-        run: |
-          export XDG_CONFIG_HOME="$RUNNER_TEMP/none-parity-config"
-          mkdir -p "$XDG_CONFIG_HOME"
-          xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty
+        run: xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty
