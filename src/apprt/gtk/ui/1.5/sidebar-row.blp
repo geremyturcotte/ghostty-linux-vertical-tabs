@@ -3,78 +3,91 @@ using Adw 1;
 
 template $GhosttySidebarRow: Adw.Bin {
   Gtk.Box {
-    orientation: horizontal;
-    spacing: 8;
-    // Breathing room. Without it the two labels collide and the list reads as
-    // a wall of text rather than a set of distinct tabs.
-    margin-top: 8;
-    margin-bottom: 8;
-    margin-start: 6;
-    margin-end: 6;
-    tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
-
-    Gtk.Image colour_dot {
-      icon-name: "media-record-symbolic";
-      pixel-size: 8;
-      valign: center;
-      visible: false;
-    }
+    orientation: vertical;
 
     Gtk.Box {
-      orientation: vertical;
-      spacing: 2;
-      hexpand: true;
-      valign: center;
+      orientation: horizontal;
+      spacing: 8;
+      // Breathing room. Without it the two labels collide and the list reads
+      // as a wall of text rather than a set of distinct tabs.
+      margin-top: 8;
+      margin-bottom: 8;
+      margin-start: 6;
+      margin-end: 6;
+      tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
 
-      Gtk.Label {
-        ellipsize: end;
-        halign: start;
-        single-line-mode: true;
-        label: bind template.page as <Adw.TabPage>.title;
+      Gtk.Image colour_dot {
+        icon-name: "media-record-symbolic";
+        pixel-size: 8;
+        valign: center;
+        visible: false;
       }
 
-      Gtk.Label {
-        ellipsize: start;
+      Gtk.Box {
+        orientation: vertical;
+        spacing: 2;
+        hexpand: true;
+        valign: center;
+
+        Gtk.Label {
+          ellipsize: end;
+          halign: start;
+          single-line-mode: true;
+          label: bind template.page as <Adw.TabPage>.title;
+        }
+
+        Gtk.Label {
+          ellipsize: start;
+          halign: start;
+          single-line-mode: true;
+          label: bind $computed_cwd(template.page as <Adw.TabPage>.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd) as <string>;
+
+          styles [
+            "caption",
+            "dim-label",
+          ]
+        }
+      }
+
+      Gtk.Image {
+        icon-name: "radio-symbolic";
+        visible: bind template.page as <Adw.TabPage>.needs-attention;
+      }
+
+      Gtk.GestureClick {
+        button: 3;
+        pressed => $right_click();
+      }
+
+      Gtk.PopoverMenu menu {
+        menu-model: row_menu;
+        has-arrow: false;
         halign: start;
-        single-line-mode: true;
-        label: bind $computed_cwd(template.page as <Adw.TabPage>.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd) as <string>;
+      }
+
+      Gtk.Button {
+        icon-name: "window-close-symbolic";
+        tooltip-text: _("Close Tab");
+        valign: center;
+        clicked => $close_clicked();
+        // Never in the terminal's focus chain.
+        can-focus: false;
+        focus-on-click: false;
 
         styles [
-          "caption",
-          "dim-label",
+          "flat",
+          "circular",
         ]
       }
     }
 
-    Gtk.Image {
-      icon-name: "radio-symbolic";
-      visible: bind template.page as <Adw.TabPage>.needs-attention;
-    }
-
-    Gtk.GestureClick {
-      button: 3;
-      pressed => $right_click();
-    }
-
-    Gtk.PopoverMenu menu {
-      menu-model: row_menu;
-      has-arrow: false;
-      halign: start;
-    }
-
-    Gtk.Button {
-      icon-name: "window-close-symbolic";
-      tooltip-text: _("Close Tab");
-      valign: center;
-      clicked => $close_clicked();
-      // Never in the terminal's focus chain.
-      can-focus: false;
-      focus-on-click: false;
-
-      styles [
-        "flat",
-        "circular",
-      ]
+    // Second-level pane rows for a split tab, populated and kept live from
+    // Zig off SplitTree's `changed` signal (ADR: sidebar knows nothing else
+    // about Ghostty, so it reacts to the signal rather than probing state).
+    // Empty for an unsplit tab, so it contributes no height and the tab's
+    // row stays pixel-identical to before this existed.
+    Gtk.Box panes_box {
+      orientation: vertical;
     }
   }
 }
