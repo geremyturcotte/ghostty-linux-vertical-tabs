@@ -175,7 +175,19 @@ jobs:
             echo "OK — binary starts and exits 0 on --version and --help"
           '
 
+      # Only a tag may touch a release. github.ref_name is the TAG on a tag
+      # push and the BRANCH on a workflow_dispatch, and the step below feeds it
+      # straight to `gh release create`. Without this guard, clicking "Run
+      # workflow" from `sidebar` publishes a prerelease literally named
+      # `sidebar` -- measured by reading the file, not by trying it, because
+      # trying it is the damage.
+      #
+      # Guarding the two release steps rather than the whole job is deliberate:
+      # a manual dispatch stays useful for exercising the expensive half --
+      # the build and the clean-container smoke test -- with no way to reach a
+      # release.
       - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -192,6 +204,7 @@ jobs:
       # tag are deleted (e.g. after a disposable test-tag run), so cleanup
       # never destroys the only record of what was actually attached.
       - name: Report attached assets (survives post-run cleanup)
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
