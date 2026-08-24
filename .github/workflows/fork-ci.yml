@@ -7,8 +7,30 @@ on:
   # commit, purely from this race, with a fully green build underneath.
   # Restricting push here means the duplicate never starts, so main/sidebar
   # still get push coverage for commits that land without a PR.
+  # `sidebar` is deliberately NOT here while PR #6 is open, and this is the
+  # second half of a fix whose first half is the comment above.
+  #
+  # Restricting push to the trunks was supposed to stop the duplicate. It does
+  # -- for every branch except the one that is BOTH a trunk and the head of an
+  # open PR. `sidebar` is exactly that. Measured on a859a98d8e:
+  #
+  #   pull_request run 32773714399 -> success
+  #   push        run 32773711466 -> CANCELLED
+  #
+  # Same commit, same concurrency group (head_ref and ref_name are both
+  # `sidebar`), cancel-in-progress kills whichever started first.
+  #
+  # That cancelled was harmless until a branch protection was added on `main`
+  # requiring build-test-parity. The protection reads the check, sees
+  # CANCELLED, and refuses the merge: PR #6 went from CLEAN to BLOCKED without
+  # anything about the code changing. Two things that were each fine alone
+  # became blocking together.
+  #
+  # `main` keeps its push coverage. `sidebar` loses nothing: while #6 is open
+  # every commit on it already gets a pull_request run, which is the one that
+  # survives the race and the one the protection reads.
   push:
-    branches: [main, sidebar]
+    branches: [main]
   pull_request: {}
   workflow_dispatch: {}
 
