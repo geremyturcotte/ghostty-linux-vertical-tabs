@@ -1,0 +1,45 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $GhosttySidebarPaneRow: Adw.Bin {
+  Gtk.Button {
+    can-focus: false;
+    clicked => $clicked();
+
+    styles [
+      "flat",
+    ]
+
+    Gtk.Box {
+      orientation: horizontal;
+      spacing: 6;
+      margin-top: 4;
+      margin-bottom: 4;
+      // Deeper than the tab row's 6px so a pane visibly nests under it --
+      // this indent is the only thing that marks it as second-level.
+      margin-start: 28;
+      // Wider than the tab row's 6px: keeps the ellipsized label clear of
+      // the column the tab row's close button lives in, so a pane row
+      // never visually implies a close affordance that doesn't exist here.
+      margin-end: 56;
+
+      Gtk.Image {
+        icon-name: "utilities-terminal-symbolic";
+        pixel-size: 12;
+        valign: center;
+      }
+
+      Gtk.Label {
+        ellipsize: end;
+        halign: start;
+        single-line-mode: true;
+        hexpand: true;
+        label: bind template.surface as <$GhosttySurface>.title;
+
+        styles [
+          "caption",
+        ]
+      }
+    }
+  }
+}

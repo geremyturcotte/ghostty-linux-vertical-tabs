@@ -10,6 +10,9 @@ const gtk = @import("gtk");
 const ext = @import("../ext.zig");
 const gresource = @import("../build/gresource.zig");
 const Common = @import("../class.zig").Common;
+const SidebarPaneRow = @import("sidebar_pane_row.zig").SidebarPaneRow;
+const SplitTree = @import("split_tree.zig").SplitTree;
+const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
 const Window = @import("window.zig").Window;
 
@@ -67,6 +70,17 @@ pub const SidebarRow = extern struct {
 
         /// The coloured dot that marks a tab.
         colour_dot: *gtk.Image,
+
+        /// Second-level pane rows, one per leaf in the tab's split tree.
+        panes_box: *gtk.Box,
+
+        /// The split tree we're currently listening to, borrowed from the
+        /// bound tab. Rows are recycled, so this must be disconnected
+        /// before rebinding to a different page's tree, same reasoning as
+        /// `Sidebar.selected_page_handler` in sidebar.zig: zig-gobject's
+        /// connect doesn't tie the handler's life to ours.
+        split_tree: ?*SplitTree = null,
+        split_tree_changed_handler: c_ulong = 0,
 
         pub var offset: c_int = 0;
     };
@@ -160,6 +174,99 @@ pub const SidebarRow = extern struct {
 
     fn notifyPage(_: *Self, _: *gobject.ParamSpec, self: *Self) callconv(.c) void {
         self.syncColour();
+        self.reconnectSplitTree();
+    }
+
+    /// Follow the bound tab's split tree, so panes rebuild live off its
+    /// `changed` signal instead of being polled.
+    fn reconnectSplitTree(self: *Self) void {
+        const priv = self.private();
+
+        if (priv.split_tree) |st| {
+            if (priv.split_tree_changed_handler != 0) {
+                gobject.signalHandlerDisconnect(
+                    st.as(gobject.Object),
+                    priv.split_tree_changed_handler,
+                );
+                priv.split_tree_changed_handler = 0;
+            }
+            priv.split_tree = null;
+        }
+
+        const st: ?*SplitTree = st: {
+            const page = priv.page orelse break :st null;
+            const tab = gobject.ext.cast(Tab, page.getChild()) orelse break :st null;
+            break :st tab.getSplitTree();
+        };
+
+        const tree: ?*Surface.Tree = tree: {
+            const s = st orelse break :tree null;
+            priv.split_tree = s;
+            priv.split_tree_changed_handler = SplitTree.signals.changed.connect(
+                s,
+                *Self,
+                splitTreeChanged,
+                self,
+                .{},
+            );
+            break :tree s.getTree();
+        };
+
+        self.syncPanes(tree);
+    }
+
+    fn splitTreeChanged(
+        _: *SplitTree,
+        _: ?*const Surface.Tree,
+        new_tree: ?*const Surface.Tree,
+        self: *Self,
+    ) callconv(.c) void {
+        self.syncPanes(new_tree);
+    }
+
+    /// Rebuild the second-level pane rows from the tree. A non-split tab
+    /// (root is a leaf, or the tree is empty/null) leaves `panes_box`
+    /// empty -- an empty GtkBox contributes no height, which is what keeps
+    /// an unsplit tab's row pixel-identical to before this existed.
+    fn syncPanes(self: *Self, tree: ?*const Surface.Tree) void {
+        const priv = self.private();
+        const box = priv.panes_box;
+
+        var child_ = box.as(gtk.Widget).getFirstChild();
+        while (child_) |child| {
+            const next = child.getNextSibling();
+            box.remove(child);
+            child_ = next;
+        }
+
+        const t = tree orelse return;
+        if (t.isEmpty()) return;
+        if (t.nodes[0] == .leaf) return;
+
+        var it = t.iterator();
+        while (it.next()) |entry| {
+            const row = gobject.ext.newInstance(SidebarPaneRow, .{ .surface = entry.view });
+            _ = SidebarPaneRow.signals.activated.connect(
+                row,
+                *Self,
+                paneActivated,
+                self,
+                .{},
+            );
+            box.append(row.as(gtk.Widget));
+        }
+    }
+
+    fn paneActivated(row: *SidebarPaneRow, self: *Self) callconv(.c) void {
+        const surface = row.getSurface() orelse return;
+
+        // Same shape as Sidebar.rowActivated: select the tab this pane
+        // belongs to before grabbing focus, so the surface is actually
+        // visible when it becomes SplitTree.active-surface.
+        const page = self.livePage() orelse return;
+        const window = ext.getAncestor(Window, self.as(gtk.Widget)) orelse return;
+        window.getTabView().setSelectedPage(page);
+        surface.grabFocus();
     }
 
     fn actionColourNone(_: *gio.SimpleAction, _: ?*glib.Variant, self: *Self) callconv(.c) void {
@@ -276,6 +383,16 @@ pub const SidebarRow = extern struct {
 
     fn dispose(self: *Self) callconv(.c) void {
         const priv = self.private();
+        if (priv.split_tree) |st| {
+            if (priv.split_tree_changed_handler != 0) {
+                gobject.signalHandlerDisconnect(
+                    st.as(gobject.Object),
+                    priv.split_tree_changed_handler,
+                );
+                priv.split_tree_changed_handler = 0;
+            }
+            priv.split_tree = null;
+        }
         priv.page = null;
         gtk.Widget.disposeTemplate(self.as(gtk.Widget), getGObjectType());
         gobject.Object.virtual_methods.dispose.call(
@@ -305,8 +422,11 @@ pub const SidebarRow = extern struct {
                 }),
             );
 
+            gobject.ext.ensureType(SidebarPaneRow);
+
             class.bindTemplateChildPrivate("menu", .{});
             class.bindTemplateChildPrivate("colour_dot", .{});
+            class.bindTemplateChildPrivate("panes_box", .{});
             class.bindTemplateCallback("close_clicked", &closeClicked);
             class.bindTemplateCallback("right_click", &rightClick);
             class.bindTemplateCallback("computed_cwd", &closureCwd);

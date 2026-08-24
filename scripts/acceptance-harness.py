@@ -19,6 +19,7 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut
     .xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder
+    .xvenv/bin/python3 scripts/acceptance-harness.py --panes
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
@@ -33,7 +34,11 @@ cannot see a pixel or a widget. --drag-reorder measures whether GTK4 DND
 actually reorders sidebar rows, using a move_tab:1 positive control (wired
 via a custom keybind this mode adds to its own launch config) to prove
 reordering is observable before trusting a synthetic-drag negative -- see
-cmd_drag_reorder()'s docstring.
+cmd_drag_reorder()'s docstring. --panes measures the v1.1 tranche 1 pane
+sub-rows the same way: real geometry read at runtime, a positive control
+before any delta is trusted, and a live before/after/back round trip through
+the app's own state (a pane's pwd) rather than assuming a click did anything
+-- see cmd_panes()'s docstring.
 """
 import argparse
 import os
@@ -42,9 +47,9 @@ import sys
 import tempfile
 import time
 
-from Xlib import X, display
+from Xlib import X, XK, display
 from Xlib.ext import xtest
-from PIL import Image
+from PIL import Image, ImageChops
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GHOSTTY_BIN = os.path.join(REPO_ROOT, "zig-out", "bin", "ghostty")
@@ -207,6 +212,35 @@ class Session:
 
     def snap(self):
         return {t[0]: t for t in tree(self.root)}
+
+    def screenshot(self):
+        raw = self.win.get_image(0, 0, self.ww, self.wh, X.ZPixmap, 0xFFFFFFFF)
+        return Image.frombytes("RGB", (self.ww, self.wh), raw.data, "raw", "BGRX")
+
+    def type_text(self, text):
+        """Send literal text as XTEST key events, uppercased/symbol chars
+        pressed with Shift. Used by --panes to give one pane a pwd the
+        other doesn't have, so a click swapping the active surface has
+        something externally observable to swap."""
+        names = {" ": "space", "/": "slash", "\n": "Return", "-": "minus"}
+        for ch in text:
+            name = names.get(ch, ch)
+            sym = XK.string_to_keysym(name)
+            if sym == 0:
+                raise RuntimeError(f"type_text: no keysym for {ch!r}")
+            needs_shift = ch.isupper()
+            kc = self.d.keysym_to_keycode(sym)
+            shift_kc = self.d.keysym_to_keycode(0xFFE1) if needs_shift else None
+            if shift_kc:
+                xtest.fake_input(self.d, X.KeyPress, shift_kc)
+            xtest.fake_input(self.d, X.KeyPress, kc)
+            self.d.sync()
+            time.sleep(0.03)
+            xtest.fake_input(self.d, X.KeyRelease, kc)
+            if shift_kc:
+                xtest.fake_input(self.d, X.KeyRelease, shift_kc)
+            self.d.sync()
+            time.sleep(0.03)
 
     def _click(self, rx, ry, button, settle):
         d = self.d
@@ -439,9 +473,22 @@ def cmd_menu():
         neg = s.probe_click(*TAB_OVERVIEW, button=1, label="tab-overview-in-window-control")
         if neg is not None:
             log("NOTE: in-window negative control unexpectedly produced an override-redirect window")
-        result = s.probe_click(*ROW1, button=3, label="row-context-menu")
+        # Measure the first row instead of trusting ROW1's hardcoded y.
+        # ROW1 = (160, 133) was measured on a build whose sidebar starts
+        # with a tab row. On the by-repository-sections build (PR #10) the
+        # first thing at that y is a SECTION HEADER, which has no context
+        # menu -- so this probe reported "row-context-menu confirmed
+        # ABSENT" on a build where the menu works fine. A negative that
+        # depends on which build you happen to be pointing at is not a
+        # measurement. measure_row_geometry() finds the rows by their close
+        # button, so it lands on a real row on either build.
+        geom = s.measure_row_geometry()
+        row1_y = round(geom["row1_y"])
+        log(f"menu: row centers measured at {geom['centers']} -- right-clicking y={row1_y}")
+        result = s.probe_click(ROW1[0], row1_y, button=3, label="row-context-menu")
         if result is None:
-            log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run)")
+            log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run, "
+                f"and the right-click landed on a MEASURED row center y={row1_y}, not a guessed one)")
             return 1
         log(f"row-context-menu: PRESENT — 0x{result['id']:x} {result['w']}x{result['h']} -> {result['png']}")
         return 0
@@ -718,6 +765,355 @@ def cmd_drag_reorder():
             log(f"drag-reorder: INCONCLUSIVE — red centre after drag ({after_drag_centre}) is "
                 f"neither rank 1 nor rank 3; something moved it somewhere unexpected")
             return 2
+    finally:
+        s.close()
+
+
+def _detect_row_bands(img, x_range, y_range, thresh=150):
+    """Groups of consecutive scanlines within y_range that have at least
+    one bright (>thresh in every channel) pixel inside x_range, returned as
+    their y-centers. The same grouping Session.measure_row_geometry uses
+    for the sidebar's close-button glyphs, generalised to scan for ANY
+    content rather than one fixed glyph -- a pane sub-row has no close
+    button to anchor on, so this looks for whatever renders in a y-range
+    that held nothing before a split, over the full sidebar column width
+    (x_range is expected to be wide; the y-range bound is what keeps this
+    from picking up a tab row's own content)."""
+    px = img.load()
+    x0, x1 = x_range
+    x1 = min(x1, img.width)
+    y0, y1 = max(0, y_range[0]), min(img.height, y_range[1])
+
+    rows_with_content = []
+    for y in range(y0, y1):
+        has = False
+        for x in range(x0, x1):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                has = True
+                break
+        rows_with_content.append(has)
+
+    groups = []
+    gap = 999
+    for i, has in enumerate(rows_with_content):
+        if has:
+            if gap > 3:
+                groups.append([y0 + i, y0 + i])
+            else:
+                groups[-1][1] = y0 + i
+            gap = 0
+        else:
+            gap += 1
+
+    return [(g0 + g1) / 2 for g0, g1 in groups]
+
+
+def _scan_close_btn_band(session):
+    """The close-button x-band, SCANNED instead of assumed — for cmd_panes only.
+
+    measure_row_geometry defaults to close_btn_x=(216, 234), read once off the
+    ~922x722 window a window manager gives. Under a bare X server (xvfb in CI,
+    Xephyr locally) the window is 800x600 and its close buttons sit at x~157:
+    the frozen band lands in the TERMINAL and reads its text lines as tab rows.
+    Measured: cmd_panes on Xephyr got centers=[66.0, 118.0] -- two rows that do
+    not exist -- and aborted with "expected 3 tab rows".
+
+    Scanning is only sound where several REAL rows exist, because it keeps the
+    longest EVENLY SPACED run and any pair of stray bands beats a single true
+    row. That is why this is local to cmd_panes, which opens three tabs before
+    calling it, and NOT the global default: applied globally it invented rows
+    on a one-tab window and turned --menu's true positive into a false
+    negative. Measured, and reverted, before this was written.
+    """
+    img = session.screenshot()
+    best, best_cx = [], None
+    for cx in range(140, 264, 6):
+        bands = _detect_row_bands(img, (cx - 16, cx + 16), (55, session.wh))
+        run = _longest_run(bands)
+        if len(run) > len(best):
+            best, best_cx = run, cx
+    return (best_cx - 16, best_cx + 16) if best_cx else (216, 234)
+
+
+def _longest_run(centers, tol=6):
+    """Longest contiguous subsequence whose gaps are uniform within tol. Tab
+    rows are evenly pitched; terminal text picked up by a mis-placed band is
+    not, so this is what separates real rows from noise."""
+    if len(centers) < 2:
+        return centers[:]
+    best = [centers[0]]
+    j, n = 0, len(centers)
+    while j < n - 1:
+        step = centers[j + 1] - centers[j]
+        k, run = j, [centers[j]]
+        while k < n - 1 and abs((centers[k + 1] - centers[k]) - step) <= tol:
+            run.append(centers[k + 1]); k += 1
+        if len(run) > len(best):
+            best = run
+        j = k if k > j else j + 1
+    return best
+
+
+CANNOT_MEASURE = 2  # ni PASS ni FAIL : l'instrument n'a pas pu monter sa scene
+
+
+def _abstain(reason, detail):
+    """An abstention is not a negative. Say so loudly, in the tool's OWN output.
+
+    A bare FAIL invites the next reader to do one of two harmful things: open a
+    phantom bug on a defect that does not exist, or -- worse -- tune the tool
+    until it turns green. Telling "I could not measure" apart from "the
+    measurement is negative" is the same discipline a guard owes: an abstention
+    is not a verdict."""
+    log("")
+    log("=== ABSTENTION — CE RUN NE MESURE RIEN ===")
+    log(f"    cause  : {reason}")
+    log(f"    detail : {detail}")
+    log("    Ce n'est PAS un defaut produit, et ce n'est PAS un verdict.")
+    log("    Le produit est verifie autrement — voir le commit a6540698e.")
+    log("    Ne 'corrige' pas ce harnais jusqu'a ce qu'il passe au vert.")
+    return CANNOT_MEASURE
+
+
+def cmd_panes():
+    """v1.1 tranche 1: second-level pane rows under a split tab's row,
+    read-only, click activates.
+
+    Everything is measured in one run, nothing assumed from a previous one:
+
+      1. Open 3 tabs and measure their row geometry with the existing
+         close-button detector -- pane rows have no close button, so they
+         can never be miscounted as tab rows, and this detector needs no
+         change to serve both. Uniform spacing across all 3 is the
+         POSITIVE CONTROL: proves the detector is trustworthy before any
+         delta read against it means anything.
+
+      2. Click rank 2's row (selects + focuses that tab) and split it via
+         new_split:right (a DEFAULT keybind, ctrl+shift+o -- no custom
+         config needed). Re-measure. Rank 1's row -- a tab this run never
+         touches -- is required to land at the exact same y as before:
+         that's DoD#1 (an unsplit tab stays visually unchanged) proven
+         live, not assumed from reading the blueprint. Rank 2's OWN row is
+         required to stay put too (nothing above it moved). Only the gap
+         between rank 2 and rank 3 may grow -- and it must, which is the
+         evidence a pane row now occupies real space there (DoD#2).
+
+      3. The freshly split-off pane already has keyboard focus (SplitTree
+         hands focus to the newest surface on a split). Typing `cd /tmp`
+         into it gives it a pwd the original pane doesn't share. The
+         sidebar row's own subtitle label is bound to
+         `...active-surface.pwd` -- literally the same property path
+         DoD#3 names (`SplitTree.active-surface`) -- so that label's
+         pixels are the one externally observable trace of which pane is
+         active.
+
+      4. Click row A, then row B, then row A again (both found by scanning
+         the gap between rank 2 and rank 3 for content -- no coordinate
+         here is hardcoded, and which row is the already-active /tmp one
+         isn't known or needed). DoD#3 requires a pane click to make
+         active-surface reflect that pane; the observable trace is A's two
+         readings matching each other while B's differs from both -- a
+         deterministic row -> state mapping and its exact reversal, which a
+         coincidental repaint would not produce.
+
+    A single synthetic click on these rows occasionally never reaches the
+    GtkButton's `clicked` signal at all (confirmed by instrumenting
+    paneActivated/ecFocusEnter/propSurfaceFocused directly: when a click
+    DOES land, the whole focus -> active-surface chain fires immediately and
+    correctly, every single time, with nothing to debounce or wait out --
+    so a screenshot showing no change means the click needs resending, not
+    that the app needs more time). Each click is retried (parking the
+    pointer away from both buttons first, to force a real leave/enter
+    crossing rather than a jump between two adjacent flat buttons) until the
+    label visibly changes or a small retry budget is spent -- a real
+    mechanism, not a longer fixed sleep.
+    """
+    ctrl_kc_sym, shift_kc_sym, o_kc_sym = 0xFFE3, 0xFFE1, 0x006F  # Control_L, Shift_L, o
+
+    def send_combo(d, mod_syms, key_sym):
+        mod_kcs = [d.keysym_to_keycode(m) for m in mod_syms]
+        key_kc = d.keysym_to_keycode(key_sym)
+        for kc in mod_kcs:
+            xtest.fake_input(d, X.KeyPress, kc)
+        xtest.fake_input(d, X.KeyPress, key_kc)
+        d.sync()
+        time.sleep(0.15)
+        xtest.fake_input(d, X.KeyRelease, key_kc)
+        for kc in reversed(mod_kcs):
+            xtest.fake_input(d, X.KeyRelease, kc)
+        d.sync()
+
+    log("mode --panes : NON DEMONTRABLE sur les affichages disponibles a ce jour.")
+    log("  bare X (xvfb/Xephyr, 800x600) : la 3e rangee disparait apres le split.")
+    log("  :0 avec un WM                 : les frappes n'atteignent pas le client")
+    log("                                  tant qu'une autre application tient le focus.")
+    log(f"  Un echec ici sort en code {CANNOT_MEASURE} (ABSTENTION), jamais en FAIL nu.")
+    s = Session()
+    try:
+        s.open_tabs(2)  # 3 total; rank 3 (index 2) is focused
+        band = _scan_close_btn_band(s)
+        log(f"panes: close-button band SCANNED at x={band} "
+            f"(window {s.ww}x{s.wh}) -- not the frozen (216, 234)")
+        geom0 = s.measure_row_geometry(close_btn_x=band)
+        if geom0["step_y"] is None or len(geom0["centers"]) < 3:
+            return _abstain(
+                "le detecteur n'a pas trouve les 3 rangees d'onglet AVANT le split",
+                f"centers={geom0['centers']} sur une fenetre {s.ww}x{s.wh} — soit la "
+                "bande du bouton de fermeture tombe a cote, soit les onglets n'ont "
+                "jamais ete ouverts parce que les frappes n'atteignent pas le client")
+        c1, c2, c3 = (round(c) for c in geom0["centers"][:3])
+        step0 = geom0["step_y"]
+        spacing_uniform = abs((c2 - c1) - (c3 - c2)) <= 3
+        log(f"panes: baseline rows at y={c1}/{c2}/{c3} step={step0} uniform={spacing_uniform}")
+        if not spacing_uniform:
+            log("POSITIVE CONTROL FAILED — row spacing isn't uniform before any split; "
+                "refusing to trust deltas measured against it")
+            return 2
+
+        s._click(ROW1[0], c2, button=1, settle=0.6)  # select + focus rank 2
+        send_combo(s.d, [ctrl_kc_sym, shift_kc_sym], o_kc_sym)  # new_split:right
+        time.sleep(1.2)  # idleAdd-debounced tree rebuild + relayout + paint
+
+        geom1 = s.measure_row_geometry(close_btn_x=band)
+        if len(geom1["centers"]) < 3:
+            return _abstain(
+                "la 3e rangee d'onglet a disparu APRES le split",
+                f"centers={geom1['centers']} sur une fenetre {s.ww}x{s.wh} — mesure sur "
+                "bare X : les sous-rangees de pane repoussent la 3e hors de portee du "
+                "detecteur. A rejouer sur une fenetre geree par un WM")
+        n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
+        log(f"panes: after split rows at y={n1}/{n2}/{n3}")
+
+        TOL = 4
+        rank1_unmoved = abs(n1 - c1) <= TOL
+        rank2_unmoved = abs(n2 - c2) <= TOL
+        gap_grew = (n3 - n2) > (c3 - c2) + TOL
+        log(f"panes: rank1_unmoved={rank1_unmoved} rank2_unmoved={rank2_unmoved} "
+            f"gap before={c3 - c2} after={n3 - n2} gap_grew={gap_grew}")
+
+        if not (rank1_unmoved and rank2_unmoved):
+            log("FAIL — splitting rank 2 moved a row it shouldn't have; an unsplit "
+                "tab's row must stay pixel-identical")
+            return 1
+        if not gap_grew:
+            log("FAIL — splitting rank 2 grew nothing between it and rank 3; no pane "
+                "row appears to have been rendered")
+            return 1
+        log("PASS — unsplit rows (rank 1, and rank 2's own row) stayed exactly where "
+            "they were; only the gap that pane rows now occupy grew")
+
+        pane_ys = _detect_row_bands(
+            s.screenshot(),
+            x_range=(0, min(260, s.ww)),
+            y_range=(round(n2 + step0 / 2), round(n3 - step0 / 2)),
+        )
+        log(f"panes: pane sub-row bands detected at y={pane_ys}")
+        if len(pane_ys) < 2:
+            raise RuntimeError(f"cmd_panes: expected 2 pane rows in the gap, found {pane_ys}")
+        row_a_y, row_b_y = round(pane_ys[0]), round(pane_ys[1])
+
+        # Give the freshly split-off pane (already focused -- SplitTree
+        # hands focus to the newest surface) a pwd the other pane doesn't
+        # share, so there's something externally visible to swap.
+        s.type_text("cd /tmp\n")
+        time.sleep(0.8)
+
+        def subtitle_snapshot(name):
+            img = s.screenshot()
+            os.makedirs(ARTIFACT_DIR, exist_ok=True)
+            path = os.path.join(ARTIFACT_DIR, f"panes-{name}.png")
+            img.save(path)
+            # rank 2's own row card: title + subtitle text, both of which
+            # move with active-surface (confirmed by direct inspection --
+            # the title line changes too, not just the subtitle). Spans the
+            # row generously around its (measured, not guessed) close-button
+            # y so neither text line is clipped regardless of exact font
+            # metrics -- a first version cropped only 4-24px below that y
+            # and silently missed both lines, reading a blank strip as "no
+            # change" on 3 of 4 runs despite the feature working correctly
+            # every single time (confirmed via source-level tracing).
+            band = img.crop((22, n2 - 20, 210, n2 + 20))
+            return band, path
+
+        def diff_ratio(a, b):
+            hist = ImageChops.difference(a, b).convert("L").histogram()
+            changed = sum(hist[16:])
+            return changed / sum(hist)
+
+        CHANGED, UNCHANGED = 0.02, 0.005
+
+        def click_pane_row_until_changed(y, prev_snap, label, retries=4):
+            # A synthetic click occasionally never reaches the target
+            # GtkButton's `clicked` signal at all -- confirmed by
+            # source-level tracing that when it DOES land, the whole
+            # focus/active-surface chain fires correctly and immediately,
+            # every time, with no debounce to wait out. So "no visible
+            # change yet" here means "the click needs resending", not "give
+            # the app more time" -- there's nothing to wait for once a click
+            # actually lands. Parking the pointer away from both buttons
+            # first forces a genuine leave/enter crossing rather than a
+            # jump straight from one flat button to its neighbour.
+            for attempt in range(1, retries + 1):
+                xtest.fake_input(s.d, X.MotionNotify, x=s.ax + 500, y=s.ay + 300)
+                s.d.sync()
+                time.sleep(0.3)
+                s._click(ROW1[0], y, button=1, settle=1.2)
+                snap, path = subtitle_snapshot(f"{label}-attempt{attempt}")
+                if diff_ratio(prev_snap, snap) > CHANGED:
+                    log(f"panes: clicked pane row {label} (attempt {attempt}) -> {path}")
+                    return snap, path
+            # Not necessarily a failure: a row that is ALREADY the active
+            # pane must not change anything when clicked. Saying "still no
+            # visible change" reads as "the click was dropped" and invites
+            # exactly the wrong conclusion -- it did, on a run that ended
+            # PASS. The verdict is the ratio triplet below, never this line.
+            log(f"panes: clicked pane row {label} {retries}x with no visible change -> {path} "
+                "(expected when that row is already the active pane; the ratio triplet decides)")
+            return snap, path
+
+        # Which detected row is the (already active) /tmp one and which is
+        # the original isn't known from geometry alone, and doesn't need to
+        # be: click row A, then row B, then row A again, and require A's two
+        # readings to match each other while B's differs from both -- that
+        # is a deterministic row->state mapping and its exact reversal,
+        # order-agnostic and with no assumption about which row starts active.
+        snap0, path0 = subtitle_snapshot("0-after-cd-tmp")
+        log(f"panes: state after cd /tmp (before any pane click) -> {path0}")
+
+        snap_a1, path_a1 = click_pane_row_until_changed(row_a_y, snap0, "A")
+        snap_b, path_b = click_pane_row_until_changed(row_b_y, snap_a1, "B")
+        snap_a2, path_a2 = click_pane_row_until_changed(row_a_y, snap_b, "A-again")
+
+        d_a1_vs_b = diff_ratio(snap_a1, snap_b)
+        d_b_vs_a2 = diff_ratio(snap_b, snap_a2)
+        d_a1_vs_a2 = diff_ratio(snap_a1, snap_a2)
+        log(f"panes: subtitle diff ratios rowA-vs-rowB={d_a1_vs_b:.4f} "
+            f"rowB-vs-rowA-again={d_b_vs_a2:.4f} rowA-vs-rowA-again={d_a1_vs_a2:.4f}")
+
+        a_to_b_changed = d_a1_vs_b > CHANGED
+        b_to_a_changed_back = d_b_vs_a2 > CHANGED
+        a_round_trip_matched = d_a1_vs_a2 < UNCHANGED
+
+        if a_to_b_changed and b_to_a_changed_back and a_round_trip_matched:
+            log("PASS — clicking each pane's sub-row visibly changed which surface is "
+                "active (the subtitle bound to SplitTree.active-surface's pwd moved "
+                "between two distinct readings and back to the exact same one), a "
+                "deterministic swap and its reversal, not a coincidental repaint")
+            return 0
+        else:
+            if (d_a1_vs_b < UNCHANGED and d_b_vs_a2 < UNCHANGED
+                    and d_a1_vs_a2 < UNCHANGED):
+                return _abstain(
+                    "les TROIS ratios sont nuls — rien n'a bouge, pas meme entre deux "
+                    "panes censes differer",
+                    f"{d_a1_vs_b:.4f} / {d_b_vs_a2:.4f} / {d_a1_vs_a2:.4f}. C'est la "
+                    "signature du `cd /tmp` jamais tape : les deux panes gardent le meme "
+                    "pwd, donc la comparaison de sous-titres est VIDE. Ce n'est pas un "
+                    "clic sans effet, c'est une scene jamais montee")
+            log("FAIL — pane clicks did not produce the expected active-surface swap "
+                "(see diff ratios above)")
+            return 1
     finally:
         s.close()
 
@@ -1335,6 +1731,9 @@ def main():
                           "with a left-mode positive control in the same run")
     ap.add_argument("--drag-reorder", action="store_true",
                      help="tab drag-to-reorder in the sidebar, with a move_tab:1 positive control")
+    ap.add_argument("--panes", action="store_true",
+                     help="v1.1 tranche 1: second-level pane rows, with a row-geometry "
+                          "positive control and a live active-surface swap round trip")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -1349,6 +1748,8 @@ def main():
         return cmd_none_shortcut()
     if args.drag_reorder:
         return cmd_drag_reorder()
+    if args.panes:
+        return cmd_panes()
 
     ap.print_help()
     return 1
