@@ -1389,7 +1389,7 @@ def _measure_sidebar_column(img):
     return x
 
 
-def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
+def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH, y0=0):
     """Diff ratio restricted to the sidebar's own column (x < col_width),
     not the whole window. A whole-window percentage does not discriminate
     here: a sidebar appearing on one side of the split and the terminal
@@ -1401,7 +1401,6 @@ def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
     before_px, after_px = before.load(), after.load()
     w = min(col_width, before.width, after.width)
     h = min(before.height, after.height)
-    y0 = _chrome_bottom(before, col_width)
     diff = sum(1 for y in range(y0, h) for x in range(w)
                if before_px[x, y] != after_px[x, y])
     total = w * (h - y0)
@@ -1409,41 +1408,55 @@ def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
 
 
 def _chrome_bottom(img, col_width):
-    """First y BELOW the window's top chrome — measured, not guessed.
+    """First y below the window's top chrome — measured, and the value it
+    returns is printed by the caller before anything is concluded from it.
 
-    The header bar spans the FULL width of the window, so it also occupies
-    x < col_width. Diffing the "sidebar column" over the full height therefore
-    counts the TITLE BAR as if it were sidebar.
+    Why the bound exists: the header bar spans the FULL width, so it also sits
+    inside x < col_width. Diffing "the sidebar column" over the whole height
+    therefore counts the TITLE BAR as sidebar. That is not hypothetical --
+    pressing Ctrl+Shift+B in `gtk-sidebar-tabs=none` rings the terminal bell
+    (the key is bound to nothing, the keystroke reaches the shell, it beeps)
+    and a bell marker is painted in the title. Measured on three binaries with
+    one variable, all three ring it: upstream 1.3.1 0.09183, fork without the
+    a11y PR 0.09173, fork with it 0.09173. Upstream behaviour.
 
-    That is not hypothetical: pressing Ctrl+Shift+B in `gtk-sidebar-tabs=none`
-    rings the terminal bell -- the key is bound to nothing, reaches the shell,
-    and it beeps -- and the fork paints a bell marker in the title. Measured on
-    three binaries with one variable, all three ring it:
+    And whether that bell moves pixels inside x < col_width depends on the
+    WORKING DIRECTORY, because the title carries the pwd. Same binary, two
+    cwds, twice each:
 
-        upstream 1.3.1        title-band diff 0.09183
-        fork without the PR   title-band diff 0.09173
-        fork with the PR      title-band diff 0.09173
+        cwd .../worktrees/panes-level2                 -> 0.00000, no rows differ
+        cwd .../a11y-focus-sidebar/worker-1            -> 0.00592, rows 20-35
 
-    So the bell is UPSTREAM behaviour, and a guard that counts it reports a
-    parity break that does not exist. This guard produced exactly that false
-    red once before this bound existed.
+    A deep worktree path makes the title long enough that inserting the bell
+    shifts text that lies inside the column; a short one shifts text that
+    lies to the right of it. So this guard could fail or pass on where a
+    contributor happened to check the repository out.
 
-    Derivation, with no constant: walk down the left edge (inside the column)
-    and the right edge (necessarily terminal). While both sides are the same
-    colour we are still in chrome that spans the window; the first row where
-    they differ is where the sidebar/terminal split actually begins.
-    """
+    A first attempt compared a single pixel on each edge and took the first
+    row where they differed. It returned 8 on every capture -- the window
+    BORDER already differs at y=8 -- so it excluded nothing and was withdrawn.
+    Hence this version: sample SEVERAL x inside the column and several in the
+    terminal, and require the two sets to stay disjoint for RUN consecutive
+    rows. A one-pixel edging cannot hold that; a real sidebar/terminal split
+    does. Returns 0 when no such split exists, which is why the caller
+    derives this from the frame that HAS a sidebar."""
     px = img.load()
     w, h = img.width, img.height
-    right = min(w - 8, w - 1)
-    left = min(8, w - 1)
+    col = max(20, min(col_width, w - 1))
+    left = [x for x in (12, col // 3, col // 2, max(12, col - 25)) if 0 <= x < w]
+    right = [x for x in (w - 30, w - 60, w - 120) if 0 <= x < w]
+    RUN = 15
+    streak = 0
     for y in range(h):
-        if px[left, y][:3] != px[right, y][:3]:
-            return y
+        ls = {px[x, y][:3] for x in left}
+        rs = {px[x, y][:3] for x in right}
+        streak = streak + 1 if not (ls & rs) else 0
+        if streak >= RUN:
+            return y - RUN + 1
     return 0
 
 
-def _shortcut_column_diff(sidebar_mode, label, col_width=None):
+def _shortcut_column_diff(sidebar_mode, label, col_width=None, y0=None):
     """Launch `sidebar_mode`, screenshot, press Ctrl+Shift+B, screenshot
     again, and return the sidebar-column diff ratio between the two."""
     s = Session(sidebar_mode=sidebar_mode)
@@ -1464,12 +1477,16 @@ def _shortcut_column_diff(sidebar_mode, label, col_width=None):
         s.close()
 
     measured = _measure_sidebar_column(before)
-    ratio = _column_diff_ratio(before, after, col_width=col_width or measured
-                               or SIDEBAR_COLUMN_WIDTH)
+    chrome = _chrome_bottom(before, measured or col_width or SIDEBAR_COLUMN_WIDTH)
+    used_y0 = y0 if y0 is not None else chrome
+    ratio = _column_diff_ratio(before, after,
+                               col_width=col_width or measured or SIDEBAR_COLUMN_WIDTH,
+                               y0=used_y0)
     used = col_width or measured or SIDEBAR_COLUMN_WIDTH
-    log(f"{label}: sidebar column MEASURED at x={measured} "
-        f"(diff taken over x<{used}) diff_ratio={ratio:.5f}")
-    return ratio, measured
+    log(f"{label}: sidebar column MEASURED at x={measured}, chrome bottom "
+        f"MEASURED at y={chrome} (diff taken over x<{used}, y>={used_y0}) "
+        f"diff_ratio={ratio:.5f}")
+    return ratio, measured, used_y0
 
 
 UPSTREAM_BIN = "/usr/bin/ghostty"
@@ -1684,7 +1701,7 @@ def cmd_none_shortcut():
     CHANGE_THRESHOLD = 0.05  # a sidebar appearing/disappearing swamps this in a 260px-wide column
     NOOP_THRESHOLD = 0.005  # cursor blink / AA jitter tolerance
 
-    left_ratio, left_col = _shortcut_column_diff("left", "left-control")
+    left_ratio, left_col, left_y0 = _shortcut_column_diff("left", "left-control")
     if not left_col:
         log("POSITIVE CONTROL FAILED — no sidebar column found in `left` mode; "
             "the column detector itself is blind, so no `none` verdict is publishable")
@@ -1699,7 +1716,8 @@ def cmd_none_shortcut():
     # sidebar to measure, and the question is precisely whether anything
     # appears in the band a sidebar would occupy.
     log(f"measuring `none` mode over the band `left` actually occupied (x<{left_col})")
-    none_ratio, none_col = _shortcut_column_diff("none", "none-mode", col_width=left_col)
+    none_ratio, none_col, _ = _shortcut_column_diff(
+        "none", "none-mode", col_width=left_col, y0=left_y0)
     # A few pixels at the left edge are the window border, not a sidebar.
     # Measured: a real sidebar is 202px against a 202px left-mode column; the
     # bare border reads 5px. Require a quarter of the control's width before
