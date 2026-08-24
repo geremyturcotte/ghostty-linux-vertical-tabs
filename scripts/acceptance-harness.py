@@ -2100,27 +2100,83 @@ def cmd_a11y_focus():
         s.close()
 
 
+def _content_band_spans(img, x_range, y_range, thresh=150):
+    """Same "any bright pixel in this y-row" grouping as `_detect_row_bands`,
+    but returns each group's own (y0, y1) SPAN rather than collapsing it to
+    a center -- needed here because the span's own height is what gets
+    cropped, not just its position."""
+    px = img.load()
+    x0, x1 = x_range
+    x1 = min(x1, img.width)
+    y0b, y1b = max(0, y_range[0]), min(img.height, y_range[1])
+
+    rows_with_content = []
+    for y in range(y0b, y1b):
+        has = False
+        for x in range(x0, x1):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                has = True
+                break
+        rows_with_content.append(has)
+
+    groups = []
+    gap = 999
+    for i, has in enumerate(rows_with_content):
+        if has:
+            if gap > 3:
+                groups.append([y0b + i, y0b + i])
+            else:
+                groups[-1][1] = y0b + i
+            gap = 0
+        else:
+            gap += 1
+    return [(g0, g1) for g0, g1 in groups]
+
+
 def _header_band_box(img, wh):
-    """(col_width, y0, y1) of the section-header band, above tab row 1 --
-    MEASURED off a frame that has at least 2 rows, never assumed. Derives
-    the same way `cmd_a11y_focus` derives its row bands: scan for the
-    close-button x-band, keep the longest evenly-spaced run of row centers,
-    and take the gap between rows as the row pitch. The header sits between
-    the window chrome and row 1's own top edge (half a pitch above its
-    center) -- `_chrome_bottom` finds the first, `_detect_tab_rows` the
-    second. Returns None if fewer than 2 rows are present to derive a pitch
-    from, or if the sidebar column itself can't be found."""
+    """(col_width, y0, y1) of the section-header band -- MEASURED, not a
+    row-pitch guess. `wh` is unused; kept so callers already passing it
+    alongside an image (as `_detect_tab_rows` requires) don't need a
+    different call shape for this derivation.
+
+    A row's close-button glyph CENTER is not its card's top edge, and this
+    sidebar's idle row cards don't render a background distinct from the
+    rest of the column at rest (measured: a min/max colour scan down the
+    column shows the SAME baseline outside of text, whether inside a row's
+    card or between rows) -- so neither "half a row-pitch above center" nor
+    "where the background changes" locates the header. What's actually
+    unique to the header is that it's the FIRST band of bright (text)
+    content below the window's own toolbar: `_chrome_bottom` finds that
+    toolbar's bottom edge, `_content_band_spans` groups the bright rows
+    below it (header text, then a gap, then row 1's title, its subtitle,
+    row 2's title, ...) using the exact `thresh=150` bright-pixel test
+    `_detect_row_bands` already uses elsewhere in this harness, and the
+    header is group zero. A small pad on both edges keeps faint
+    anti-aliased glyph edges from being clipped out of the crop.
+
+    Cross-checked against the reference 800x600 bare-X window this harness
+    already uses elsewhere: chrome_bottom=51, and the header's own text
+    band measured independently (frame-diff, 1-tab vs 2-tab) at y=[88,101]
+    -- this function's padded span lands inside that range on the same
+    window.
+
+    Returns None if the sidebar column can't be found, or if no bright
+    band exists below the toolbar to call the header."""
     col = _measure_sidebar_column(img)
     if col <= 0:
         return None
-    rows, _cx = _detect_tab_rows(img, wh)
-    if len(rows) < 2:
+    top = _chrome_bottom(img, col)
+    if top <= 0:
         return None
-    step = rows[1] - rows[0]
-    half_h = step / 2.0
-    y1 = rows[0] - half_h
-    y0 = _chrome_bottom(img, col)
-    if y0 <= 0 or y1 <= y0:
+    spans = _content_band_spans(img, (0, col), (top, img.height))
+    if not spans:
+        return None
+    y0, y1 = spans[0]
+    pad = 3
+    y0 = max(top, y0 - pad)
+    y1 = min(img.height, y1 + pad + 1)
+    if y1 <= y0:
         return None
     return col, int(y0), int(y1)
 
@@ -2184,7 +2240,7 @@ def cmd_section_header():
 
         s_git.focus_terminal()
         s_git.open_tabs(1)
-        time.sleep(1.0)
+        time.sleep(3.0)  # let OSC 7 + the deferred rebuild land before capturing
         t1_img = s_git.screenshot()
 
         box = _header_band_box(t1_img, s_git.wh)
