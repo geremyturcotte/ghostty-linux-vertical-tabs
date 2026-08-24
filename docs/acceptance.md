@@ -31,6 +31,7 @@ broken twice, and nothing but a human reading a log ever caught it.
 .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour  # Task 11: colour + scroll
 .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity    # none-mode UI parity
 .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut  # none-mode Ctrl+Shift+B no-op, stricter
+.xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder   # tab drag-to-reorder, with a move_tab:1 control
 ```
 
 A GTK4 popover on X11 is a separate override-redirect X window, not a region
@@ -81,6 +82,29 @@ banner's row instead of the prompt) — skipped, rather than reported
 misleadingly, whenever the sidebar column itself just changed, since a
 reflowed terminal's wrapped prompt produces the same "text end moved" signal
 for an unrelated reason.
+
+`--drag-reorder` measures whether GTK4 drag-and-drop actually reorders
+sidebar rows. Same positive-control discipline as everything else here: it
+colours the newest (focused) row a unique red, sends `move_tab:1` (wired via
+a custom keybind this mode adds to its own launch config — there's no
+default binding for it) to prove reordering is *observable* to the detector
+at all (with exactly 3 tabs this wraps rank 3 to rank 1), and only then
+attempts a synthetic drag and checks whether the marked row moved. Row
+positions come from `Session.measure_row_geometry()` (below), not a
+hardcoded offset — an earlier constant here was wrong, and a wrong row
+target would have made a "nothing moved" reading meaningless regardless of
+the positive control.
+
+`Session.measure_row_geometry()` locates every visible row's close ("x")
+button in a fixed x-band and takes the median gap between consecutive
+centers, instead of trusting a hardcoded row-spacing constant.
+`--scroll-colour` and `--drag-reorder` both use it. An earlier version
+hardcoded 66px (guessed from one early measurement); independent review,
+using this harness against a live window, measured the true spacing at
+54.0px, uniform — confirmed here independently across a full 6-row window:
+centers `[132.5, 186.5, 240.5, 294.5, 348.5, 402.5]`, step 54.0px exactly.
+The wrong constant missed the row card entirely from row 3 onward and made
+`--scroll-colour`'s band check pass only by chance (see that section below).
 
 Each mode launches its own isolated ghostty process and prints its evidence
 (a popover's X window id, or a structural pixel measurement) plus PNGs under
@@ -306,24 +330,34 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       the active tab; the sidebar highlight moved to match. Confirmed working.
 - [ ] Drag a tab out into its own window: neither window crashes and both
       sidebars are correct. This is the path the `notify::selected-page` guards
-      exist for. **NOT MEASURABLE BY THIS HARNESS — confirmed a distinct gap
-      from the popover false negative, not the same bug.** The Task 9/11
-      false negatives above turned out to share one root cause: screenshotting
-      the parent window instead of diffing the X tree for the popover's own
-      override-redirect window, now fixed in `scripts/acceptance-harness.py`.
-      This item was re-examined against that fix and is **not** the same
-      failure — a click-and-drag doesn't spawn any new or remapped
-      override-redirect X window to detect in the first place (confirmed:
-      running the harness's `snap()`/diff during a synthetic drag attempt
-      shows no popover-shaped window at all, new or remapped). GTK4's
-      tab-tear-off is driven by `AdwTabView`'s internal
-      `GtkDragSource`/`GtkDropTarget` drag-gesture recognizer, which needs a
-      real grab-and-threshold sequence a plain XTEST `ButtonPress` +
-      `MotionNotify` steps + `ButtonRelease` isn't confirmed to satisfy — an
-      X-tree diff can't help either way since the feature under test isn't a
-      popover. Still needs a human with a real mouse, or a harness that can
-      verify GTK's drag-gesture state directly (e.g. via GTK inspector/AT-SPI)
-      rather than X-tree diffing. Left unchecked.
+      exist for. **Measured: the feature does not exist, this is not a
+      harness limitation.** Earlier rounds treated this as unmeasurable
+      because a click-and-drag spawns no popover-shaped X window for the
+      harness's window-tree-diff detector to see — true, but the wrong
+      question. `scripts/acceptance-harness.py --drag-reorder` measures the
+      underlying mechanism directly: it colours the focused tab a unique
+      red, sends `move_tab:1` (a positive control — with exactly 3 tabs this
+      wraps rank 3 to rank 1, proving reordering *is* observable to the
+      detector), then attempts a synthetic drag from rank 1 toward rank 3
+      (30 `MotionNotify` steps, 1s hold before release). The positive
+      control succeeds — the marked row moves to rank 1 exactly as
+      predicted — and the drag then has **zero effect**: the row stays at
+      rank 1, reproduced twice with an identical reading both times
+      (screenshots: `.prokai/tmp/dispatch-artifacts/drag-reorder-1-coloured-rank3.png`
+      through `drag-reorder-3-after-drag.png`).
+
+      Confirmed by reading the source directly, not just inferred from the
+      negative: `src/apprt/gtk/class/sidebar.zig` and `sidebar_row.zig` wire
+      no `GtkDragSource` or `GtkDropTarget` at all. The only `DropTarget`
+      anywhere in the GTK apprt is `surface.zig`'s, for file drops onto the
+      terminal — unrelated to tabs. There is nothing to drag. Reordering
+      *within* the sidebar and tearing a tab out into its own window are
+      both driven by the same missing DND wiring on the tab widget, so this
+      one measurement settles both: **not "unmeasurable" — measured, and
+      the feature isn't implemented.** Left unchecked (a measured absence is
+      still a checklist item that isn't satisfied); implementing the DND
+      wiring is out of this worker's declared scope (docs + harness only)
+      and needs its own ticket.
 - [x] Close the last tab: the window closes cleanly. **Measured**: closed the
       2nd-to-last row's `×`, confirmed 1 row remained; closed that last row's
       `×`; the process exited fully within ~1s (`ps aux` showed nothing), no

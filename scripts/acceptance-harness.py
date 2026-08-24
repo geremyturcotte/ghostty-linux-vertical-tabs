@@ -18,6 +18,7 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut
+    .xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
@@ -28,7 +29,11 @@ promise (tab bar present, no sidebar, no sidebar shortcut) via pixel
 structure rather than popover detection -- see cmd_none_parity()'s and
 cmd_none_shortcut()'s docstrings. Neither modifies or replaces
 scripts/check-none-parity.sh, which only diffs GTK/GLib log output and
-cannot see a pixel or a widget.
+cannot see a pixel or a widget. --drag-reorder measures whether GTK4 DND
+actually reorders sidebar rows, using a move_tab:1 positive control (wired
+via a custom keybind this mode adds to its own launch config) to prove
+reordering is observable before trusting a synthetic-drag negative -- see
+cmd_drag_reorder()'s docstring.
 """
 import argparse
 import os
@@ -110,6 +115,16 @@ def _wait_for_no_stray_ghostty(timeout=8.0):
 
 
 def launch_ghostty(extra_config="", sidebar_mode="left"):
+    if not os.path.exists(GHOSTTY_BIN):
+        raise RuntimeError(
+            f"no ghostty binary at {GHOSTTY_BIN} (GHOSTTY_BIN is REPO_ROOT/zig-out/bin/ghostty, "
+            f"REPO_ROOT={REPO_ROOT}). Either build one there (`zig build --search-prefix "
+            "\"$HOME/.local\"`), or if you're testing against a binary built elsewhere, "
+            "symlink it in: `mkdir -p zig-out/bin && ln -sf <path-to-binary> zig-out/bin/ghostty` "
+            "-- this symlink is gitignored (zig-out/) and must be re-created any time it's "
+            "missing; a bare Popen() against a missing path fails with an unhelpful raw "
+            "FileNotFoundError instead of this message, which is why this check exists."
+        )
     _wait_for_no_stray_ghostty()
     env = dict(os.environ)
     env["GDK_BACKEND"] = "x11"
@@ -557,6 +572,152 @@ def cmd_scroll_colour():
             log("task11: FAIL — a colour is missing from its expected row's band, or present "
                 "in the other row's band (recycling put colour on the wrong row)")
             return 1
+    finally:
+        s.close()
+
+
+def _red_centre_in_sidebar(img, col_width=260):
+    """y-center of reddish pixels in the sidebar column, or None if none
+    found. Shared by cmd_drag_reorder's before/after/positive-control reads
+    -- the same is_reddish invariant cmd_scroll_colour already validated.
+    col_width defaults to 260, matching SIDEBAR_COLUMN_WIDTH defined later
+    in this file (module-level constant, not referenced directly here to
+    avoid a definition-order dependency)."""
+    def is_reddish(px):
+        r, g, b = px[:3]
+        return r > 180 and g < 160 and b < 160
+
+    sidebar = img.crop((0, 0, min(col_width, img.width), img.height))
+    pixels = sidebar.load()
+    ys = [y for y in range(sidebar.height) for x in range(sidebar.width) if is_reddish(pixels[x, y])]
+    return sum(ys) / len(ys) if ys else None
+
+
+def cmd_drag_reorder():
+    """Tab drag-to-reorder within the sidebar. Also the deciding evidence
+    for the checklist's separate "drag a tab into its own window" item
+    (`docs/acceptance.md`), since both are driven by the same DND wiring on
+    the tab widget -- confirmed absent by reading the source directly:
+    `src/apprt/gtk/class/sidebar.zig` and `sidebar_row.zig` wire no
+    `GtkDragSource`/`GtkDropTarget` at all; the only `DropTarget` anywhere
+    in the GTK apprt is `surface.zig`'s, for file drops onto the terminal,
+    unrelated to tabs.
+
+    Protocol: open 3 tabs, colour the newest (focused, rank 3) row red --
+    ONE marker, so there's no ambiguity about which row moved. Send
+    `move_tab:1` via a custom keybind this command adds to its own launch
+    config (no default keybind exists for it) -- with exactly 3 tabs this
+    wraps position 2 to position 0 (see `moveTab` in window.zig), so the
+    red dot must land at rank 1. That's the POSITIVE CONTROL: it proves
+    reordering is observable to this detector at all, before a
+    synthetic-drag negative gets to mean anything. Only then does a
+    synthetic drag (rank 1 -> rank 3, 30 `MotionNotify` steps, 1s hold
+    before `ButtonRelease`) get attempted, and the dot's position is
+    checked again -- staying at rank 1 confirms the drag had no effect,
+    consistent with the source read: there's nothing to drag, this is a
+    measured absence of the feature, not this harness being blind to it."""
+    ctrl_kc_sym, shift_kc_sym, m_kc_sym = 0xFFE3, 0xFFE1, 0x006D  # Control_L, Shift_L, m
+    s = Session(extra_config="keybind = ctrl+shift+m=move_tab:1\n")
+    try:
+        s.open_tabs(2)  # 3 total; the newest (index 2, rank 3) is focused
+        geom = s.measure_row_geometry()
+        if geom["step_y"] is None or len(geom["centers"]) < 3:
+            raise RuntimeError(f"cmd_drag_reorder: expected 3 rows, measured {geom['centers']}")
+        rank1_y, rank2_y, rank3_y = (round(c) for c in geom["centers"][:3])
+        log(f"drag-reorder: measured ranks 1/2/3 at y={rank1_y}/{rank2_y}/{rank3_y}")
+
+        s.colour_row((ROW1[0], rank3_y), 4, "drag-reorder-rank3")  # Red
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        coloured_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        coloured_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-1-coloured-rank3.png"))
+        coloured_centre = _red_centre_in_sidebar(coloured_img)
+        log(f"drag-reorder: red centre after colouring={coloured_centre} (expect near rank3_y={rank3_y})")
+
+        s.focus_terminal()  # the colour popover closing doesn't hand keyboard focus back on its own
+
+        ctrl_kc = s.d.keysym_to_keycode(ctrl_kc_sym)
+        shift_kc = s.d.keysym_to_keycode(shift_kc_sym)
+        m_kc = s.d.keysym_to_keycode(m_kc_sym)
+        xtest.fake_input(s.d, X.KeyPress, ctrl_kc)
+        xtest.fake_input(s.d, X.KeyPress, shift_kc)
+        xtest.fake_input(s.d, X.KeyPress, m_kc)
+        s.d.sync()
+        time.sleep(0.15)
+        xtest.fake_input(s.d, X.KeyRelease, m_kc)
+        xtest.fake_input(s.d, X.KeyRelease, shift_kc)
+        xtest.fake_input(s.d, X.KeyRelease, ctrl_kc)
+        s.d.sync()
+        time.sleep(1.0)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after_movetab_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after_movetab_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-2-after-movetab.png"))
+        after_movetab_centre = _red_centre_in_sidebar(after_movetab_img)
+        log(f"drag-reorder: red centre after move_tab:1={after_movetab_centre} (expect near rank1_y={rank1_y})")
+
+        BAND_TOLERANCE = 15
+        control_ok = (
+            after_movetab_centre is not None
+            and abs(after_movetab_centre - rank1_y) <= BAND_TOLERANCE
+        )
+        if not control_ok:
+            log("POSITIVE CONTROL FAILED — move_tab:1 did not move the coloured row to rank 1; "
+                "refusing to trust a synthetic-drag negative without proof reordering is observable")
+            return 2
+        log("positive control OK: move_tab:1 moved the coloured row from rank 3 to rank 1 -- "
+            "reordering is observable to this detector")
+
+        # Synthetic drag: rank 1 -> rank 3, matching the reference recipe
+        # (30 steps, 1s hold) used to independently validate this finding.
+        x0, y0 = ROW1[0], rank1_y
+        x1, y1 = ROW1[0], rank3_y
+        xtest.fake_input(s.d, X.MotionNotify, x=s.ax + x0, y=s.ay + y0)
+        s.d.sync()
+        time.sleep(0.3)
+        xtest.fake_input(s.d, X.ButtonPress, 1)
+        s.d.sync()
+        time.sleep(0.1)
+        steps = 30
+        for i in range(1, steps + 1):
+            fx = x0 + (x1 - x0) * i / steps
+            fy = y0 + (y1 - y0) * i / steps
+            xtest.fake_input(s.d, X.MotionNotify, x=s.ax + round(fx), y=s.ay + round(fy))
+            s.d.sync()
+            time.sleep(0.03)
+        time.sleep(1.0)  # hold before release
+        xtest.fake_input(s.d, X.ButtonRelease, 1)
+        s.d.sync()
+        time.sleep(1.0)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after_drag_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after_drag_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-3-after-drag.png"))
+        after_drag_centre = _red_centre_in_sidebar(after_drag_img)
+        log(f"drag-reorder: red centre after synthetic drag={after_drag_centre} "
+            f"(rank1_y={rank1_y}, rank3_y={rank3_y})")
+
+        stayed_at_rank1 = (
+            after_drag_centre is not None and abs(after_drag_centre - rank1_y) <= BAND_TOLERANCE
+        )
+        moved_to_rank3 = (
+            after_drag_centre is not None and abs(after_drag_centre - rank3_y) <= BAND_TOLERANCE
+        )
+
+        if stayed_at_rank1 and not moved_to_rank3:
+            log("drag-reorder: NOT IMPLEMENTED (measured) — synthetic drag had no effect after "
+                "a same-run positive control confirmed reordering is observable; matches the "
+                "source read (no GtkDragSource/GtkDropTarget wired in sidebar.zig/sidebar_row.zig)")
+            return 0
+        elif moved_to_rank3:
+            log("drag-reorder: REORDERING HAPPENED — the drag moved the row to rank 3. "
+                "Contradicts the source read; needs a human to confirm before trusting this.")
+            return 1
+        else:
+            log(f"drag-reorder: INCONCLUSIVE — red centre after drag ({after_drag_centre}) is "
+                f"neither rank 1 nor rank 3; something moved it somewhere unexpected")
+            return 2
     finally:
         s.close()
 
@@ -1108,6 +1269,8 @@ def main():
     ap.add_argument("--none-shortcut", action="store_true",
                      help="none mode: Ctrl+Shift+B must be a no-op on the sidebar column, "
                           "with a left-mode positive control in the same run")
+    ap.add_argument("--drag-reorder", action="store_true",
+                     help="tab drag-to-reorder in the sidebar, with a move_tab:1 positive control")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -1120,6 +1283,8 @@ def main():
         return cmd_none_parity()
     if args.none_shortcut:
         return cmd_none_shortcut()
+    if args.drag_reorder:
+        return cmd_drag_reorder()
 
     ap.print_help()
     return 1
