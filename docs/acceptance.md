@@ -30,6 +30,7 @@ broken twice, and nothing but a human reading a log ever caught it.
 .xvenv/bin/python3 scripts/acceptance-harness.py --menu           # Task 9: row context menu
 .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour  # Task 11: colour + scroll
 .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity    # none-mode UI parity
+.xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut  # none-mode Ctrl+Shift+B no-op, stricter
 ```
 
 A GTK4 popover on X11 is a separate override-redirect X window, not a region
@@ -54,6 +55,19 @@ on top of a still-running instance of the same binary (a stray one skews
 window placement for the next launch and produced one flaky reading during
 review), and re-measures its pixel signals until two consecutive readings
 agree rather than trusting a single screenshot after a fixed sleep.
+
+`--none-shortcut` is a stricter, dedicated companion to `--none-parity`'s own
+Ctrl+Shift+B check: it diffs only the sidebar's own column (x<260), not the
+whole window, because a whole-window diff ratio doesn't discriminate this
+case (a sidebar appearing on one side and the terminal reflowing on the
+other measured ~2% either way, sidebar-toggle or not), and it runs a
+same-run positive control confirming the identical gesture produces a large
+column diff in `left` mode — a no-op check that couldn't detect a real
+toggle either would prove nothing. Confirms the same finding `--none-parity`
+already reported: measured a 55% column diff in `none` mode (vs. `left`
+mode's 59% for the same gesture) — nearly identical magnitude, meaning the
+sidebar isn't producing a smaller side effect in `none` mode, it's fully
+toggling exactly as it does in `left` mode.
 
 Each mode launches its own isolated ghostty process and prints its evidence
 (a popover's X window id, or a structural pixel measurement) plus PNGs under
@@ -97,7 +111,11 @@ tripped an Adwaita assertion at window construction.
       mode this section's intro describes ("already been broken once") —
       found by this measurement, not fixed by it: fixing the keybind gate
       is out of this worker's declared scope (docs + harness only) and
-      needs its own ticket. Left unchecked.
+      needs its own ticket. Left unchecked. Confirmed independently by
+      `scripts/acceptance-harness.py --none-shortcut`, a stricter,
+      dedicated check with its own positive control (see the harness usage
+      section above) — 55% sidebar-column diff in `none` mode vs. 59% for
+      the identical gesture in `left` mode, essentially the same toggle.
 - [x] `none` produces **zero** `CRITICAL` lines. Compare against upstream:
       ```bash
       ./zig-out/bin/ghostty --gtk-sidebar-tabs=none --quit-after-last-window-closed=true 2>&1 \

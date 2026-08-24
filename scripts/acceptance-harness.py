@@ -17,16 +17,18 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --menu
     .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity
+    .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
 fire the hamburger positive control first in the same run and refuse to
-report a negative if it fails. --none-parity is a separate concern: it
-measures the UI-level half of `--gtk-sidebar-tabs=none`'s promise (tab bar
-present, no sidebar, no sidebar shortcut) via pixel structure rather than
-popover detection -- see cmd_none_parity()'s docstring. It does not modify
-or replace scripts/check-none-parity.sh, which only diffs GTK/GLib log
-output and cannot see a pixel or a widget.
+report a negative if it fails. --none-parity and --none-shortcut are a
+separate concern: they measure the UI-level half of `--gtk-sidebar-tabs=none`'s
+promise (tab bar present, no sidebar, no sidebar shortcut) via pixel
+structure rather than popover detection -- see cmd_none_parity()'s and
+cmd_none_shortcut()'s docstrings. Neither modifies or replaces
+scripts/check-none-parity.sh, which only diffs GTK/GLib log output and
+cannot see a pixel or a widget.
 """
 import argparse
 import os
@@ -40,7 +42,7 @@ from Xlib.ext import xtest
 from PIL import Image
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GHOSTTY_BIN = "/home/prokai/Github/ghostty-linux-vertical-tabs/zig-out/bin/ghostty"
+GHOSTTY_BIN = os.path.join(REPO_ROOT, "zig-out", "bin", "ghostty")
 ARTIFACT_DIR = os.path.join(REPO_ROOT, ".prokai", "tmp", "dispatch-artifacts")
 
 # Coordinates measured on the 922x722 reference window (docs/acceptance.md).
@@ -55,6 +57,34 @@ def log(msg):
     print(f"[harness] {msg}", flush=True)
 
 
+def _find_stray_ghostty_pids():
+    """PIDs whose actual executable (/proc/<pid>/exe, resolved) is this exact
+    binary. Deliberately NOT `pgrep -f GHOSTTY_BIN`: -f matches the full
+    command line text of ANY process, so a shell merely containing the
+    binary's path as a string (e.g. in a command it's about to run, or in
+    its scrollback) is indistinguishable from a live ghostty process to
+    pgrep -- caught in review: an operator's own shell was matched and the
+    guard below refused to launch against a process that wasn't ghostty at
+    all. Comparing the resolved executable path is the actual measurement;
+    command-line text is a coincidence, not evidence."""
+    target = os.path.realpath(GHOSTTY_BIN)
+    pids = []
+    try:
+        entries = os.listdir("/proc")
+    except FileNotFoundError:
+        return pids  # no /proc -- can't check, proceed as before
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            exe = os.readlink(f"/proc/{entry}/exe")
+        except OSError:
+            continue  # process exited mid-scan, or exe unreadable -- not ours
+        if exe == target:
+            pids.append(entry)
+    return pids
+
+
 def _wait_for_no_stray_ghostty(timeout=8.0):
     """Refuse to launch on top of a still-running instance of this exact
     binary. A stray process from a prior run (this harness's own cleanup
@@ -67,11 +97,7 @@ def _wait_for_no_stray_ghostty(timeout=8.0):
     belongs here, at the root cause, not just in the guard that noticed it."""
     deadline = time.time() + timeout
     while True:
-        try:
-            r = subprocess.run(["pgrep", "-f", GHOSTTY_BIN], capture_output=True, text=True)
-        except FileNotFoundError:
-            return  # no pgrep available -- can't check, proceed as before
-        pids = [p for p in r.stdout.split() if p]
+        pids = _find_stray_ghostty_pids()
         if not pids:
             return
         if time.time() >= deadline:
@@ -121,9 +147,10 @@ def tree(win, acc=None):
 
 
 def find_ghostty_window(d, root, timeout=8.0):
-    """Match by WM_CLASS ("ghostty", "com.mitchellh.ghostty"), not WM_NAME --
-    the window title is the shell's cwd, not the app name, so it varies with
-    the launch directory and cannot be relied on."""
+    """Match by WM_CLASS ("ghostty" or "ghostty-debug" -- a Debug/ReleaseSafe
+    build appends "-debug" to its app-id, see src/apprt/gtk/App.zig:26 and
+    src/apprt/gtk/winproto/x11.zig:47 -- not WM_NAME, since the window title
+    is the shell's cwd and varies with the launch directory."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         for (wid, nm, w, h, x, y, orr, ms) in tree(root):
@@ -133,7 +160,7 @@ def find_ghostty_window(d, root, timeout=8.0):
                     cls = win.get_wm_class()
                 except Exception:
                     continue
-                if cls and any(c == "ghostty" for c in cls):
+                if cls and any(c in ("ghostty", "ghostty-debug") for c in cls):
                     return wid, w, h
         time.sleep(0.3)
     return None
@@ -676,6 +703,107 @@ def cmd_none_parity():
         return 1
 
 
+def _press_ctrl_shift_b(s):
+    ctrl_kc = s.d.keysym_to_keycode(0xFFE3)
+    shift_kc = s.d.keysym_to_keycode(0xFFE1)
+    b_kc = s.d.keysym_to_keycode(0x0062)  # b
+    xtest.fake_input(s.d, X.KeyPress, ctrl_kc)
+    xtest.fake_input(s.d, X.KeyPress, shift_kc)
+    xtest.fake_input(s.d, X.KeyPress, b_kc)
+    s.d.sync()
+    time.sleep(0.15)
+    xtest.fake_input(s.d, X.KeyRelease, b_kc)
+    xtest.fake_input(s.d, X.KeyRelease, shift_kc)
+    xtest.fake_input(s.d, X.KeyRelease, ctrl_kc)
+    s.d.sync()
+    time.sleep(1.0)
+
+
+SIDEBAR_COLUMN_WIDTH = 260  # matches cmd_scroll_colour's sidebar-crop convention
+
+
+def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
+    """Diff ratio restricted to the sidebar's own column (x < col_width),
+    not the whole window. A whole-window percentage does not discriminate
+    here: a sidebar appearing on one side of the split and the terminal
+    reflowing on the other nets out to roughly the same overall percentage
+    whether or not the sidebar actually toggled -- measured 2.1% in BOTH
+    `left` and `none` modes despite one clearly showing a sidebar
+    appear/disappear and the other not. Restricting the diff to the column
+    the sidebar actually occupies removes that cancellation."""
+    before_px, after_px = before.load(), after.load()
+    w = min(col_width, before.width, after.width)
+    h = min(before.height, after.height)
+    diff = sum(1 for y in range(h) for x in range(w) if before_px[x, y] != after_px[x, y])
+    total = w * h
+    return diff / total if total else 0.0
+
+
+def _shortcut_column_diff(sidebar_mode, label):
+    """Launch `sidebar_mode`, screenshot, press Ctrl+Shift+B, screenshot
+    again, and return the sidebar-column diff ratio between the two."""
+    s = Session(sidebar_mode=sidebar_mode)
+    try:
+        s.open_tabs(1)
+        time.sleep(0.5)
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        before = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        before.save(os.path.join(ARTIFACT_DIR, f"none-shortcut-{label}-before.png"))
+
+        _press_ctrl_shift_b(s)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after.save(os.path.join(ARTIFACT_DIR, f"none-shortcut-{label}-after.png"))
+    finally:
+        s.close()
+
+    ratio = _column_diff_ratio(before, after)
+    log(f"{label}: sidebar-column(x<{SIDEBAR_COLUMN_WIDTH}) diff_ratio={ratio:.5f}")
+    return ratio
+
+
+def cmd_none_shortcut():
+    """Ctrl+Shift+B must be a no-op in `gtk-sidebar-tabs=none`: no image
+    change at all, measured on the sidebar's own column (x<260), not the
+    whole window -- see _column_diff_ratio's docstring for why a whole-window
+    percentage doesn't discriminate this case (2.1% diff measured in BOTH
+    `left` and `none` runs).
+
+    Positive control, same run: `left` mode must show a LARGE column diff for
+    the identical gesture, or the run refuses to conclude anything about
+    `none` -- a no-op measurement that can't detect a real toggle either
+    proves nothing. This is a stricter, dedicated companion to the
+    whole-window shortcut check already inside cmd_none_parity(); that one
+    already caught the sidebar-shortcut regression, but has no positive
+    control of its own for the shortcut sub-check specifically."""
+    log("positive control: `left` mode, Ctrl+Shift+B must change the sidebar column")
+    CHANGE_THRESHOLD = 0.05  # a sidebar appearing/disappearing swamps this in a 260px-wide column
+    NOOP_THRESHOLD = 0.005  # cursor blink / AA jitter tolerance
+
+    left_ratio = _shortcut_column_diff("left", "left-control")
+    if left_ratio < CHANGE_THRESHOLD:
+        log(f"POSITIVE CONTROL FAILED — left mode sidebar-column diff_ratio={left_ratio:.5f} "
+            f"< {CHANGE_THRESHOLD}; refusing to conclude anything about `none` mode")
+        return 2
+    log(f"positive control OK: left mode sidebar-column diff_ratio={left_ratio:.5f} (sidebar toggled)")
+
+    log("measuring `none` mode: Ctrl+Shift+B must be a no-op")
+    none_ratio = _shortcut_column_diff("none", "none-mode")
+    no_effect = none_ratio < NOOP_THRESHOLD
+    log(f"none: sidebar-column diff_ratio={none_ratio:.5f} no_effect={no_effect}")
+
+    if no_effect:
+        log("none-shortcut: PASS — Ctrl+Shift+B is a no-op in none mode "
+            "(positive control confirmed the same gesture changes the column in left mode)")
+        return 0
+    else:
+        log(f"none-shortcut: FAIL — Ctrl+Shift+B changed the sidebar column in none mode "
+            f"(diff_ratio={none_ratio:.5f} >= {NOOP_THRESHOLD})")
+        return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hamburger", action="store_true", help="positive control only")
@@ -683,6 +811,9 @@ def main():
     ap.add_argument("--scroll-colour", action="store_true", help="Task 11: 6 tabs, colour + scroll scenario")
     ap.add_argument("--none-parity", action="store_true",
                      help="none-mode UI parity: tab bar present, no sidebar, no sidebar shortcut")
+    ap.add_argument("--none-shortcut", action="store_true",
+                     help="none mode: Ctrl+Shift+B must be a no-op on the sidebar column, "
+                          "with a left-mode positive control in the same run")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -693,6 +824,8 @@ def main():
         return cmd_scroll_colour()
     if args.none_parity:
         return cmd_none_parity()
+    if args.none_shortcut:
+        return cmd_none_shortcut()
 
     ap.print_help()
     return 1
