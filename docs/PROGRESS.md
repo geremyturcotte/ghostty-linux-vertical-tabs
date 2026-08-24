@@ -13,7 +13,7 @@ Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tab
 | 5 | Toggle: action, keybind, header button | ✅ done, verified on screen |
 | 6 | Per-row close button | ✅ done, verified on screen |
 | 7 | Adaptive collapse + acceptance checklist | ✅ done |
-| 8 | README, GIF, tagged release | 🟡 README done; screenshot + tag left |
+| 8 | README, screenshot, tagged release | ✅ done (screenshot `fe3e13240`; tag in Task 14) |
 | 9 | Right-click menu on rows | ✅ done, verified on screen |
 | 10 | Working-directory subtitle | ✅ done, verified on screen |
 | 11 | Per-tab colour marks | ✅ done, verified on screen |
