@@ -162,7 +162,51 @@ pub const Sidebar = extern struct {
         priv.model.setModel(sort_model.as(gio.ListModel));
         sort_model.unref();
 
+        // Swapping in a fresh header factory forces every currently visible
+        // header to be torn down and re-bound from scratch, even for a
+        // section whose boundary didn't move (e.g. a single-tab window whose
+        // one-and-only section stays at position 0 across the rebuild).
+        // `headerBind` computes its label once, at bind time; GtkListView
+        // only re-binds a header when it decides that header's *section*
+        // changed, which it detects from the model's `GtkSectionModel`
+        // signals — those aren't guaranteed to fire just because we replaced
+        // the model wholesale above. A same-position section's already-bound
+        // header can then keep displaying a stale label (e.g. "No
+        // repository") after the tab's pwd arrives via OSC 7, even though
+        // `keyFor` would now compute the right one. A distinct factory
+        // instance sidesteps that detection question entirely, the same way
+        // replacing `priv.model`'s model above sidesteps the analogous
+        // question for row ordering (see this function's doc comment).
+        self.installHeaderFactory();
+
         self.syncSelection();
+    }
+
+    /// (Re)install the header factory on `priv.view`. Called once from
+    /// `setTabView` and again on every `rebuildSortModel` — see the comment
+    /// there for why a fresh factory, not the same one reused, is what makes
+    /// a same-position section header refresh its label.
+    fn installHeaderFactory(self: *Self) void {
+        const priv = self.private();
+
+        const header_factory = gtk.SignalListItemFactory.new();
+        _ = gtk.SignalListItemFactory.signals.setup.connect(
+            header_factory,
+            *Self,
+            headerSetup,
+            self,
+            .{},
+        );
+        _ = gtk.SignalListItemFactory.signals.bind.connect(
+            header_factory,
+            *Self,
+            headerBind,
+            self,
+            .{},
+        );
+        // set_header_factory is transfer-none too.
+        priv.view.setHeaderFactory(header_factory.as(gtk.ListItemFactory));
+        header_factory.unref();
     }
 
     /// Point the sidebar at a tab view. Called once, by the window.
@@ -187,25 +231,6 @@ pub const Sidebar = extern struct {
             .{},
         );
         self.rebuildPwdWatches();
-
-        const header_factory = gtk.SignalListItemFactory.new();
-        _ = gtk.SignalListItemFactory.signals.setup.connect(
-            header_factory,
-            *Self,
-            headerSetup,
-            self,
-            .{},
-        );
-        _ = gtk.SignalListItemFactory.signals.bind.connect(
-            header_factory,
-            *Self,
-            headerBind,
-            self,
-            .{},
-        );
-        // set_header_factory is transfer-none too.
-        priv.view.setHeaderFactory(header_factory.as(gtk.ListItemFactory));
-        header_factory.unref();
 
         priv.selected_page_handler = gobject.Object.signals.notify.connect(
             tab_view,
