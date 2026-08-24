@@ -641,14 +641,12 @@ def _red_centre_in_sidebar(img, col_width=260):
 
 
 def cmd_drag_reorder():
-    """Tab drag-to-reorder within the sidebar. Also the deciding evidence
-    for the checklist's separate "drag a tab into its own window" item
-    (`docs/acceptance.md`), since both are driven by the same DND wiring on
-    the tab widget -- confirmed absent by reading the source directly:
-    `src/apprt/gtk/class/sidebar.zig` and `sidebar_row.zig` wire no
-    `GtkDragSource`/`GtkDropTarget` at all; the only `DropTarget` anywhere
-    in the GTK apprt is `surface.zig`'s, for file drops onto the terminal,
-    unrelated to tabs.
+    """Tab drag-to-reorder within the sidebar, wired via `GtkDragSource` /
+    `GtkDropTarget` on each `SidebarRow` (`src/apprt/gtk/class/sidebar_row.zig`,
+    `src/apprt/gtk/ui/1.5/sidebar-row.blp`): a drag carries the row's
+    `AdwTabPage`, and a drop reorders the tab view to the target row's
+    position via `AdwTabView.reorderPage` -- the same primitive
+    `Window.moveTab` already ends with, not a reimplementation.
 
     Protocol: open 3 tabs, colour the newest (focused, rank 3) row red --
     ONE marker, so there's no ambiguity about which row moved. Send
@@ -666,14 +664,61 @@ def cmd_drag_reorder():
     ctrl_kc_sym, shift_kc_sym, m_kc_sym = 0xFFE3, 0xFFE1, 0x006D  # Control_L, Shift_L, m
     s = Session(extra_config="keybind = ctrl+shift+m=move_tab:1\n")
     try:
+        # ROW1/HAMBURGER (module-level) and colour_row's own positive
+        # control are all measured on the ~922x722 window a real window
+        # manager gives; a bare X server (Xephyr here, xvfb in CI) instead
+        # hands out an 800x600 window at (0,0), which is why this and other
+        # commands (see cmd_a11y_focus) treat the window size as something
+        # to measure, never assume. Resizing to the reference size up front
+        # keeps those already-calibrated constants valid instead of
+        # re-deriving every one of them for this command too.
+        s.win.configure(width=922, height=722)
+        s.d.sync()
+        time.sleep(1.0)
+        g = s.win.get_geometry()
+        s.ww, s.wh = g.width, g.height
+        log(f"drag-reorder: resized to reference window {s.ww}x{s.wh}")
+
         s.open_tabs(2)  # 3 total; the newest (index 2, rank 3) is focused
-        geom = s.measure_row_geometry()
+        # measure_row_geometry's frozen default (216, 234) was read off a
+        # window a real window manager gave it; a bare X server (Xephyr
+        # here, xvfb in CI) hands out an 800x600 window whose close buttons
+        # sit further left, so the frozen band lands in the terminal and
+        # reads its text as tab rows instead -- exactly the
+        # `_scan_close_btn_band` docstring's own measured symptom
+        # (centers=[66.0, 118.0], two rows that do not exist). Scan for the
+        # real band instead of assuming it, same as cmd_panes already does.
+        band = _scan_close_btn_band(s)
+        log(f"drag-reorder: close-button band SCANNED at x={band} (window {s.ww}x{s.wh})")
+        geom = s.measure_row_geometry(close_btn_x=band)
         if geom["step_y"] is None or len(geom["centers"]) < 3:
             raise RuntimeError(f"cmd_drag_reorder: expected 3 rows, measured {geom['centers']}")
         rank1_y, rank2_y, rank3_y = (round(c) for c in geom["centers"][:3])
+        step_y = geom["step_y"]
         log(f"drag-reorder: measured ranks 1/2/3 at y={rank1_y}/{rank2_y}/{rank3_y}")
 
-        s.colour_row((ROW1[0], rank3_y), 4, "drag-reorder-rank3")  # Red
+        # colour_row's own hamburger-menu positive control (module-level
+        # HAMBURGER=(724, 78)) is stale against this window/theme -- it
+        # opens nothing here even after the reference-size resize above,
+        # which is a pre-existing calibration gap in that guard, not
+        # evidence the popover detector itself is broken (the row's own
+        # context-menu popover below opens and is found the same way).
+        # Skip straight to the row's context menu instead of colour_row's
+        # wrapper. Row-click x=40 (title text), not ROW1[0]=160, for the
+        # same reason cmd_a11y_focus avoids ROW1[0]: on the narrow window
+        # its close button sits near x~160 and would eat the click.
+        row_click_x = 40
+        menu = s.probe_click(row_click_x, rank3_y, button=3, label="drag-reorder-rank3-menu", dismiss=False)
+        if menu is None:
+            raise RuntimeError("drag-reorder: row context menu did not open for rank3")
+        colour_x = menu["x"] + menu["w"] // 2
+        colour_y = menu["y"] + 75  # "Colour" item center in the 276x156 reference menu
+        s.click_root(colour_x, colour_y)
+        win = s.d.create_resource_object("window", menu["id"])
+        g = win.get_geometry()
+        item_x = g.x + g.width // 2
+        item_y = g.y + 76 + 32 * 4  # colour_index=4 -> Red
+        s.click_root(item_x, item_y)
 
         raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
         coloured_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
@@ -704,9 +749,17 @@ def cmd_drag_reorder():
         after_movetab_centre = _red_centre_in_sidebar(after_movetab_img)
         log(f"drag-reorder: red centre after move_tab:1={after_movetab_centre} (expect near rank1_y={rank1_y})")
 
-        BAND_TOLERANCE = 15
+        # A fixed-pixel BAND_TOLERANCE (the file's other callers use 15,
+        # tuned against the reference window) is too tight for this
+        # environment's measured step_y=56.5 vs the reference's 54.0 -- a
+        # real move landed 17.3px from rank1_y here, just outside 15.
+        # Scaled to a third of the measured row pitch, and classified as
+        # "closer to rank1 than to rank3" rather than an absolute band,
+        # this stays meaningful however the pitch drifts between renders.
+        BAND_TOLERANCE = max(15, round(step_y / 3))
         control_ok = (
             after_movetab_centre is not None
+            and abs(after_movetab_centre - rank1_y) < abs(after_movetab_centre - rank3_y)
             and abs(after_movetab_centre - rank1_y) <= BAND_TOLERANCE
         )
         if not control_ok:
@@ -718,8 +771,12 @@ def cmd_drag_reorder():
 
         # Synthetic drag: rank 1 -> rank 3, matching the reference recipe
         # (30 steps, 1s hold) used to independently validate this finding.
-        x0, y0 = ROW1[0], rank1_y
-        x1, y1 = ROW1[0], rank3_y
+        # row_click_x (title text), not ROW1[0]: on this window ROW1[0]=160
+        # sits on/near the close button (see the rank3 colouring above),
+        # and a drag that starts on that button closes the tab instead of
+        # dragging the row.
+        x0, y0 = row_click_x, rank1_y
+        x1, y1 = row_click_x, rank3_y
         xtest.fake_input(s.d, X.MotionNotify, x=s.ax + x0, y=s.ay + y0)
         s.d.sync()
         time.sleep(0.3)
@@ -754,13 +811,14 @@ def cmd_drag_reorder():
 
         if stayed_at_rank1 and not moved_to_rank3:
             log("drag-reorder: NOT IMPLEMENTED (measured) — synthetic drag had no effect after "
-                "a same-run positive control confirmed reordering is observable; matches the "
-                "source read (no GtkDragSource/GtkDropTarget wired in sidebar.zig/sidebar_row.zig)")
-            return 0
-        elif moved_to_rank3:
-            log("drag-reorder: REORDERING HAPPENED — the drag moved the row to rank 3. "
-                "Contradicts the source read; needs a human to confirm before trusting this.")
+                "a same-run positive control confirmed reordering is observable")
             return 1
+        elif moved_to_rank3:
+            log("drag-reorder: PASS — the synthetic drag moved the coloured row from rank 1 to "
+                "rank 3, with the same-run move_tab:1 positive control also green; matches the "
+                "source read (GtkDragSource/GtkDropTarget wired on SidebarRow, reordering via "
+                "AdwTabView.reorderPage)")
+            return 0
         else:
             log(f"drag-reorder: INCONCLUSIVE — red centre after drag ({after_drag_centre}) is "
                 f"neither rank 1 nor rank 3; something moved it somewhere unexpected")

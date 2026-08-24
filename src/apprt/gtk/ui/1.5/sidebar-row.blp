@@ -59,6 +59,16 @@ template $GhosttySidebarRow: Adw.Bin {
         pressed => $right_click();
       }
 
+      Gtk.DragSource drag_source {
+        actions: move;
+        prepare => $drag_prepare();
+      }
+
+      Gtk.DropTarget drop_target {
+        actions: move;
+        drop => $row_drop();
+      }
+
       Gtk.PopoverMenu menu {
         menu-model: row_menu;
         has-arrow: false;
