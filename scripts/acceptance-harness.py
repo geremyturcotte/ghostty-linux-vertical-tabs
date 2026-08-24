@@ -809,6 +809,52 @@ def _detect_row_bands(img, x_range, y_range, thresh=150):
     return [(g0 + g1) / 2 for g0, g1 in groups]
 
 
+def _scan_close_btn_band(session):
+    """The close-button x-band, SCANNED instead of assumed — for cmd_panes only.
+
+    measure_row_geometry defaults to close_btn_x=(216, 234), read once off the
+    ~922x722 window a window manager gives. Under a bare X server (xvfb in CI,
+    Xephyr locally) the window is 800x600 and its close buttons sit at x~157:
+    the frozen band lands in the TERMINAL and reads its text lines as tab rows.
+    Measured: cmd_panes on Xephyr got centers=[66.0, 118.0] -- two rows that do
+    not exist -- and aborted with "expected 3 tab rows".
+
+    Scanning is only sound where several REAL rows exist, because it keeps the
+    longest EVENLY SPACED run and any pair of stray bands beats a single true
+    row. That is why this is local to cmd_panes, which opens three tabs before
+    calling it, and NOT the global default: applied globally it invented rows
+    on a one-tab window and turned --menu's true positive into a false
+    negative. Measured, and reverted, before this was written.
+    """
+    img = session.screenshot()
+    best, best_cx = [], None
+    for cx in range(140, 264, 6):
+        bands = _detect_row_bands(img, (cx - 16, cx + 16), (55, session.wh))
+        run = _longest_run(bands)
+        if len(run) > len(best):
+            best, best_cx = run, cx
+    return (best_cx - 16, best_cx + 16) if best_cx else (216, 234)
+
+
+def _longest_run(centers, tol=6):
+    """Longest contiguous subsequence whose gaps are uniform within tol. Tab
+    rows are evenly pitched; terminal text picked up by a mis-placed band is
+    not, so this is what separates real rows from noise."""
+    if len(centers) < 2:
+        return centers[:]
+    best = [centers[0]]
+    j, n = 0, len(centers)
+    while j < n - 1:
+        step = centers[j + 1] - centers[j]
+        k, run = j, [centers[j]]
+        while k < n - 1 and abs((centers[k + 1] - centers[k]) - step) <= tol:
+            run.append(centers[k + 1]); k += 1
+        if len(run) > len(best):
+            best = run
+        j = k if k > j else j + 1
+    return best
+
+
 def cmd_panes():
     """v1.1 tranche 1: second-level pane rows under a split tab's row,
     read-only, click activates.
@@ -880,7 +926,10 @@ def cmd_panes():
     s = Session()
     try:
         s.open_tabs(2)  # 3 total; rank 3 (index 2) is focused
-        geom0 = s.measure_row_geometry()
+        band = _scan_close_btn_band(s)
+        log(f"panes: close-button band SCANNED at x={band} "
+            f"(window {s.ww}x{s.wh}) -- not the frozen (216, 234)")
+        geom0 = s.measure_row_geometry(close_btn_x=band)
         if geom0["step_y"] is None or len(geom0["centers"]) < 3:
             raise RuntimeError(f"cmd_panes: expected 3 tab rows, measured {geom0['centers']}")
         c1, c2, c3 = (round(c) for c in geom0["centers"][:3])
@@ -896,7 +945,7 @@ def cmd_panes():
         send_combo(s.d, [ctrl_kc_sym, shift_kc_sym], o_kc_sym)  # new_split:right
         time.sleep(1.2)  # idleAdd-debounced tree rebuild + relayout + paint
 
-        geom1 = s.measure_row_geometry()
+        geom1 = s.measure_row_geometry(close_btn_x=band)
         if len(geom1["centers"]) < 3:
             raise RuntimeError(f"cmd_panes: expected 3 tab rows after split, measured {geom1['centers']}")
         n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
