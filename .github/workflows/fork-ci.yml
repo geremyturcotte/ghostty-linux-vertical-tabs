@@ -16,11 +16,15 @@ name: Fork CI
 # on, and it conflicts on nothing because nothing upstream references it.
 # github.ref is refs/heads/<branch> on push but refs/pull/<n>/merge on
 # pull_request — two different groups for the same commit, so push and
-# pull_request runs never dedupe against each other. head_ref is only set on
-# pull_request; falling back to ref covers push. Measured: without this,
-# every commit ran the full ~10min build twice in parallel.
+# pull_request runs never dedupe against each other. head_ref (PR source
+# branch, short name) falling back to ref_name (push, ALSO the short name —
+# not ref, which is the long refs/heads/<branch> form and still wouldn't
+# match head_ref) puts both events in the same group. Measured: without
+# this, every commit ran the full ~10min build twice in parallel; the first
+# version of this fix (head_ref || ref) only fixed it for pull_request and
+# was verified wrong on push.
 concurrency:
-  group: fork-ci-${{ github.head_ref || github.ref }}
+  group: fork-ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
