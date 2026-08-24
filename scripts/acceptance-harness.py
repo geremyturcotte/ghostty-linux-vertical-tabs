@@ -20,6 +20,8 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut
     .xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder
     .xvenv/bin/python3 scripts/acceptance-harness.py --panes
+    .xvenv/bin/python3 scripts/acceptance-harness.py --a11y-focus
+    .xvenv/bin/python3 scripts/acceptance-harness.py --section-header
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
@@ -119,7 +121,7 @@ def _wait_for_no_stray_ghostty(timeout=8.0):
         time.sleep(0.5)
 
 
-def launch_ghostty(extra_config="", sidebar_mode="left"):
+def launch_ghostty(extra_config="", sidebar_mode="left", cwd=None):
     if not os.path.exists(GHOSTTY_BIN):
         raise RuntimeError(
             f"no ghostty binary at {GHOSTTY_BIN} (GHOSTTY_BIN is REPO_ROOT/zig-out/bin/ghostty, "
@@ -142,7 +144,7 @@ def launch_ghostty(extra_config="", sidebar_mode="left"):
         f.write(extra_config)
     env["XDG_CONFIG_HOME"] = cfgdir
     proc = subprocess.Popen(
-        [GHOSTTY_BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [GHOSTTY_BIN], env=env, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     return proc
 
@@ -189,8 +191,8 @@ def find_ghostty_window(d, root, timeout=8.0):
 class Session:
     """One ghostty process + its X connection, window handle, and absolute origin."""
 
-    def __init__(self, extra_config="", sidebar_mode="left"):
-        self.proc = launch_ghostty(extra_config, sidebar_mode)
+    def __init__(self, extra_config="", sidebar_mode="left", cwd=None):
+        self.proc = launch_ghostty(extra_config, sidebar_mode, cwd=cwd)
         time.sleep(6.0)  # window map + first paint settle (proven recipe)
         self.d = display.Display(os.environ.get("DISPLAY", ":0"))
         self.root = self.d.screen().root
@@ -2098,6 +2100,146 @@ def cmd_a11y_focus():
         s.close()
 
 
+def _header_band_box(img, wh):
+    """(col_width, y0, y1) of the section-header band, above tab row 1 --
+    MEASURED off a frame that has at least 2 rows, never assumed. Derives
+    the same way `cmd_a11y_focus` derives its row bands: scan for the
+    close-button x-band, keep the longest evenly-spaced run of row centers,
+    and take the gap between rows as the row pitch. The header sits between
+    the window chrome and row 1's own top edge (half a pitch above its
+    center) -- `_chrome_bottom` finds the first, `_detect_tab_rows` the
+    second. Returns None if fewer than 2 rows are present to derive a pitch
+    from, or if the sidebar column itself can't be found."""
+    col = _measure_sidebar_column(img)
+    if col <= 0:
+        return None
+    rows, _cx = _detect_tab_rows(img, wh)
+    if len(rows) < 2:
+        return None
+    step = rows[1] - rows[0]
+    half_h = step / 2.0
+    y1 = rows[0] - half_h
+    y0 = _chrome_bottom(img, col)
+    if y0 <= 0 or y1 <= y0:
+        return None
+    return col, int(y0), int(y1)
+
+
+def cmd_section_header():
+    """Section-header rebind, measured as a pixel-band comparison -- never a
+    text read. Same family as `--drag-reorder`: no OCR, no accessibility
+    tree, just the same band of pixels captured twice and diffed.
+
+    THE BUG (measured by hand, 2026-08-24, before this mode existed): a
+    window opened with ONE tab, inside a git repo, shows "No repository" in
+    its section header -- even though the tab's pwd is already the repo
+    root. Opening a SECOND tab (same repo, so still one section) makes the
+    header correct. `headerBind` computes its label once, at bind time, and
+    GTK only re-invokes it when it thinks a header's section boundary
+    moved; a same-position single section's pwd arriving via OSC 7 doesn't
+    move any boundary, so the stale label sticks until something else (like
+    a second tab) forces a rebuild that happens to also force a rebind.
+
+    THE MEASUREMENT: capture the header band (see `_header_band_box`) at
+    t0 -- one tab, freshly launched inside a git repo -- and again at t1,
+    after opening a second tab in the SAME window (same section, so the
+    header's position does not move). Comparing the SAME band at the SAME
+    coordinates:
+
+        t0 != t1  -> the header's pixels changed when the 2nd tab arrived
+                     -> it was NOT already showing the repo name at t0
+                     -> RED (the bug, reproduced)
+        t0 == t1  -> the header already looked like its final state at t0
+                     -> the correct label was already bound before the 2nd
+                        tab -> GREEN (fixed)
+
+    POSITIVE CONTROL (same run, required before trusting either verdict
+    above): a header band CAN differ when the label differs -- proven by
+    comparing t1 (git repo, label = repo name) against a header band from a
+    fresh one-tab window launched OUTSIDE any git repo (label = "No
+    repository" for real, no OSC-7-arrival ambiguity involved -- the
+    label is right the first time because there is nothing to wait for).
+    If those two do NOT differ, the band-diff technique cannot tell two
+    different labels apart here and neither RED nor GREEN above is
+    trustworthy -- abstain (`CANNOT_MEASURE`), don't report either.
+    """
+    def band(session, box):
+        col, y0, y1 = box
+        return session.screenshot().crop((0, y0, col, y1)).tobytes()
+
+    repo_dir = REPO_ROOT  # this checkout is itself a git repo
+    plain_dir = tempfile.mkdtemp(prefix="acceptance-harness-nogit-")
+
+    s_git = Session(sidebar_mode="left", cwd=repo_dir)
+    try:
+        t0_img = s_git.screenshot()
+        box = _header_band_box(t0_img, s_git.wh)
+        if box is None:
+            return _abstain(
+                "could not derive the header band from a 1-tab frame",
+                f"window {s_git.ww}x{s_git.wh}: _measure_sidebar_column or "
+                "_detect_tab_rows didn't yield a usable geometry with only 1 row")
+        col, y0, y1 = box
+        log(f"section-header: band x=[0,{col}) y=[{y0},{y1}) (derived from a 2-row frame)")
+
+        t0 = t0_img.crop((0, y0, col, y1)).tobytes()
+
+        s_git.focus_terminal()
+        s_git.open_tabs(1)
+        time.sleep(1.0)
+        t1_img = s_git.screenshot()
+        # Re-derive with the now-2-row frame and require it agree with the
+        # 1-row box above -- if row 1 moved when row 2 was added, the two
+        # tabs landed in different sections (not the same-section scenario
+        # this mode measures) and the band comparison would be meaningless.
+        box2 = _header_band_box(t1_img, s_git.wh)
+        if box2 is None or box2 != box:
+            return _abstain(
+                "header band geometry moved (or vanished) between 1 and 2 tabs",
+                f"1-tab box={box} 2-tab box={box2} -- the two tabs likely "
+                "landed in different sections instead of the same one this "
+                "mode requires")
+        t1 = band(s_git, box)
+    finally:
+        s_git.close()
+
+    s_plain = Session(sidebar_mode="left", cwd=plain_dir)
+    try:
+        if (s_plain.ww, s_plain.wh) != (t0_img.width, t0_img.height):
+            return _abstain(
+                "control window geometry differs from the measured window",
+                f"git-repo window {t0_img.width}x{t0_img.height} vs "
+                f"no-git window {s_plain.ww}x{s_plain.wh} -- the same crop "
+                "box can't be trusted across two different window sizes")
+        control = band(s_plain, box)
+    finally:
+        s_plain.close()
+
+    control_differs = control != t1
+    log(f"section-header: positive control (no-git band vs t1 band) differs={control_differs}")
+    if not control_differs:
+        return _abstain(
+            "positive control did not differ",
+            "a header band known to say \"No repository\" (control, launched "
+            "outside any git repo) is pixel-identical to t1's band -- the "
+            "band-diff technique can't tell these two labels apart here, so "
+            "neither a RED nor a GREEN verdict below would be trustworthy")
+    log("positive control OK: the band-diff technique distinguishes a "
+        "\"No repository\" header from a repo-name header at these coordinates")
+
+    same = t0 == t1
+    if same:
+        log("section-header: PASS — t0 (1 tab) already matched t1 (2 tabs); "
+            "the header showed the repo name before the 2nd tab arrived, "
+            "not \"No repository\"")
+        return 0
+    log("section-header: FAIL — t0 (1 tab) differs from t1 (2 tabs): the "
+        "header's pixels changed when the 2nd tab arrived, meaning it was "
+        "NOT already showing the repo name at t0 (positive control passed, "
+        "so this is a real negative, not a detector failure)")
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hamburger", action="store_true", help="positive control only")
@@ -2117,6 +2259,10 @@ def main():
                      help="sidebar keyboard path: Ctrl+Shift+L focuses the tab list, "
                           "arrows move the selection, Enter/Space activate, Escape returns "
                           "focus to the terminal -- with a mouse positive control in the same run")
+    ap.add_argument("--section-header", action="store_true", dest="section_header",
+                     help="a 1-tab window's section header must already show the repo name, "
+                          "not \"No repository\", by the time a 2nd same-repo tab opens -- "
+                          "band-diff measurement with a no-git positive control in the same run")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -2135,6 +2281,8 @@ def main():
         return cmd_panes()
     if args.a11y_focus:
         return cmd_a11y_focus()
+    if args.section_header:
+        return cmd_section_header()
 
     ap.print_help()
     return 1
