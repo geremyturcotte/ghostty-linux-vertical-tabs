@@ -139,6 +139,18 @@ jobs:
       # run if `ldd` reports any missing shared library. This must stay a
       # workflow step, not a local check: a local check catches today's
       # regression but not the next one.
+      # ldd only proves the dynamic linker can resolve every DT_NEEDED
+      # entry — it says nothing about whether the program actually runs
+      # (a missing GSettings schema, an unresolvable resource, a crash on
+      # the first GTK call would all sail through an ldd-only check). So
+      # this also execs the real binary, headless, and requires exit 0.
+      # Deliberately limited to --version/--help: neither needs a display
+      # or D-Bus session (verified locally, including inside this same
+      # bare ubuntu:24.04 + four-package container), so this proves the
+      # binary starts and its GTK/libadwaita init path completes without
+      # requiring us to fake a compositor here. It does not prove the
+      # terminal itself renders or accepts input — that's out of scope
+      # for a headless CI guard.
       - name: Guard — verify the shipped binary runs on a clean system
         run: |
           name="${{ steps.package.outputs.name }}"
@@ -156,6 +168,11 @@ jobs:
               exit 1
             fi
             echo "OK — no missing shared libraries"
+            echo "--- smoke test: --version ---"
+            "$bin" --version
+            echo "--- smoke test: --help ---"
+            "$bin" --help >/dev/null
+            echo "OK — binary starts and exits 0 on --version and --help"
           '
 
       - name: Attach to GitHub Release
@@ -169,3 +186,16 @@ jobs:
                  --title "$tag" --notes "Fork release build for $tag." --prerelease
           gh release upload "$tag" "${name}.tar.gz" SHA256SUMS \
             --repo "${{ github.repository }}" --clobber
+
+      # Printed into the run's own log, not just the release page — this
+      # stays readable via `gh run view --log` even after the release and
+      # tag are deleted (e.g. after a disposable test-tag run), so cleanup
+      # never destroys the only record of what was actually attached.
+      - name: Report attached assets (survives post-run cleanup)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          echo "Assets attached to release $tag:"
+          gh release view "$tag" --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
