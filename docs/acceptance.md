@@ -395,9 +395,7 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
 
       What the check actually verifies, precisely: it locates the y-center of
       the reddish and blueish pixels in the post-scroll screenshot and
-      requires the red center to fall inside row 1's expected y-band
-      (measured row height ± 25px tolerance, to absorb the ~13px drift
-      observed between the pre-scroll and post-"scroll to top" layouts) *and*
+      requires the red center to fall inside row 1's expected y-band *and*
       the blue center inside row 2's band *and* neither colour present at all
       in the other row's band. An earlier version of this check only tested
       "is there a reddish pixel anywhere in the sidebar column, and a blueish
@@ -406,9 +404,23 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       exactly the failure this test case exists to catch (an independent
       review of the committed harness caught this). The band-restricted
       version was verified to still report PASS against the same recorded
-      run (screenshots: `.prokai/tmp/dispatch-artifacts/task11-coloured-before-scroll.png`,
-      `task11-after-scroll-recycle.png`; measured in that run: red center
-      y=132.5 inside row 1's band, blue center y=186.5 inside row 2's band,
-      no red in row 2's band, no blue in row 1's band). **`PROGRESS.md`'s
-      Task 11 line ("Per-tab colour marks — ✅ done, verified on screen") is
+      run.
+
+      The row spacing the bands are built from is *measured at runtime*
+      (`Session.measure_row_geometry()`), not a hardcoded constant. An
+      earlier version hardcoded 66px, guessed from a single early
+      measurement; independent review, using this harness against a real
+      target, found the true spacing is 54.0px, uniform, verified by
+      locating all 6 rows' close buttons and taking the median gap between
+      their centers. Left uncorrected, that wrong constant would have missed
+      the row-card entirely from row 3 onward, and the band check above only
+      passed the earlier +/-25px-tolerance version *by chance* (row 2's
+      wrong-constant band left 12.5px of a 25px margin; row 3's would have
+      sat exactly on the boundary). Measuring the spacing removes the
+      luck — verified in the current run: red center y=132.5 exactly on row
+      1's measured center, blue center y=186.5 exactly on row 2's, no red in
+      row 2's band, no blue in row 1's band (screenshots:
+      `.prokai/tmp/dispatch-artifacts/task11-coloured-before-scroll.png`,
+      `task11-after-scroll-recycle.png`). **`PROGRESS.md`'s Task 11 line
+      ("Per-tab colour marks — ✅ done, verified on screen") is
       corroborated.**

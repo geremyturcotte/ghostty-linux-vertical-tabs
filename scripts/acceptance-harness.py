@@ -325,6 +325,70 @@ class Session:
         item_y = g.y + 76 + 32 * colour_index
         self.click_root(item_x, item_y)
 
+    def measure_row_geometry(self, close_btn_x=(216, 234), y_scan=(60, None)):
+        """Measure the actual y-center of each visible sidebar row and the
+        spacing between them, instead of trusting a hardcoded constant.
+        ROW_STEP_Y=66 (guessed from a single early measurement) was found,
+        independent review, to be wrong -- the true spacing is 54.0px,
+        uniform across rows, measured by locating each row's close ("x")
+        button (a small bright glyph in a fixed x-band) and taking the
+        median gap between consecutive centers. A click computed from the
+        wrong constant misses the row card starting at row 3
+        (ROW1[1] + 2*66 = 265 vs the real row 3 center at 240.5) and a
+        band-tolerance check derived from it holds only by chance at row 2
+        and would fail at row 3. Measuring this at runtime instead of
+        hardcoding it also makes row-targeting immune to row-height
+        variation (a missing subtitle, a different font, HiDPI scale) the
+        same way the chrome-agnostic redesign made --none-parity immune to
+        a debug build's banner.
+
+        Returns {"row1_y": float, "step_y": float or None, "centers": [...]}.
+        step_y is None if fewer than 2 rows were detected (nothing to take
+        a spacing from); raises if zero rows were detected at all."""
+        y0, y1 = y_scan
+        y1 = y1 or self.wh
+        raw = self.win.get_image(0, 0, self.ww, self.wh, X.ZPixmap, 0xFFFFFFFF)
+        img = Image.frombytes("RGB", (self.ww, self.wh), raw.data, "raw", "BGRX")
+        px = img.load()
+        x0, x1 = close_btn_x
+        x1 = min(x1, self.ww)
+        thresh = 150
+
+        rows_with_btn = []
+        for y in range(y0, y1):
+            has = False
+            for x in range(x0, x1):
+                r, g, b = px[x, y][:3]
+                if r > thresh and g > thresh and b > thresh:
+                    has = True
+                    break
+            rows_with_btn.append(has)
+
+        groups = []
+        gap = 999
+        for i, has in enumerate(rows_with_btn):
+            if has:
+                if gap > 3:
+                    groups.append([y0 + i, y0 + i])
+                else:
+                    groups[-1][1] = y0 + i
+                gap = 0
+            else:
+                gap += 1
+
+        centers = [(g0 + g1) / 2 for g0, g1 in groups]
+        if not centers:
+            raise RuntimeError("measure_row_geometry: no sidebar rows detected -- "
+                                "is the sidebar visible and at least one tab open?")
+
+        step_y = None
+        if len(centers) >= 2:
+            diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+            step_y = diffs[len(diffs) // 2]  # median
+
+        log(f"measure_row_geometry: centers={centers} step_y={step_y}")
+        return {"row1_y": centers[0], "step_y": step_y, "centers": centers}
+
     def close(self):
         try:
             self.d.close()
@@ -370,9 +434,6 @@ def cmd_menu():
         s.close()
 
 
-ROW_STEP_Y = 66  # vertical spacing between sidebar rows, measured on the reference window
-
-
 def cmd_scroll_colour():
     """Task 11: open 6 tabs, colour rows 1 (Red) and 2 (Blue) via the row
     menu, shrink the window so the 6-row list must scroll, scroll to the
@@ -389,8 +450,16 @@ def cmd_scroll_colour():
     try:
         s.open_tabs(5)  # 6 total with the initial tab
 
-        s.colour_row(ROW1, 4, "row1")  # Red
-        s.colour_row((ROW1[0], ROW1[1] + ROW_STEP_Y), 1, "row2")  # Blue
+        geom = s.measure_row_geometry()
+        if geom["step_y"] is None:
+            raise RuntimeError("cmd_scroll_colour: could not measure row spacing "
+                                "(fewer than 2 rows detected with 6 tabs open)")
+        row1_y, step_y = geom["row1_y"], geom["step_y"]
+        log(f"task11: measured row1_y={row1_y} step_y={step_y} (not the hardcoded "
+            "ROW_STEP_Y=66 an earlier version used, which was wrong -- true spacing is 54px)")
+
+        s.colour_row((ROW1[0], round(row1_y)), 4, "row1")  # Red
+        s.colour_row((ROW1[0], round(row1_y + step_y)), 1, "row2")  # Blue
 
         before_shot = os.path.join(ARTIFACT_DIR, "task11-coloured-before-scroll.png")
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
@@ -436,15 +505,18 @@ def cmd_scroll_colour():
         # be waved through because red and blue both still exist on screen
         # somewhere. Require each colour's y-center to fall within its own
         # row's band, and require it NOT to fall within the other row's band
-        # (catches a partial swap). ROW_STEP_Y is measured on the pre-resize,
-        # pre-scroll layout; after "scroll to top" the observed row spacing
-        # has drifted somewhat (measured 54px vs the nominal 66px in one
-        # captured run), so the band is wide (+/-25px) to absorb that rather
-        # than assume exact pixel reproduction across window states.
-        BAND_TOLERANCE = 25
+        # (catches a partial swap). row1_y/step_y are measured once, above,
+        # before the resize/scroll -- the per-row height itself doesn't
+        # change across window states, only how many rows fit on screen, so
+        # the same measured step is reused here. The tolerance (+/-15px,
+        # tighter than an earlier version's +/-25 now that the step itself
+        # is measured instead of guessed) absorbs the residual few-pixel
+        # rendering variance observed between the pre-scroll and
+        # post-"scroll to top" layouts, not a wrong constant.
+        BAND_TOLERANCE = 15
 
         def band(row_index):
-            center = ROW1[1] + row_index * ROW_STEP_Y
+            center = row1_y + row_index * step_y
             return (center - BAND_TOLERANCE, center + BAND_TOLERANCE)
 
         def is_reddish(px):
