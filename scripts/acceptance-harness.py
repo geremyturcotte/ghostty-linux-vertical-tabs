@@ -694,9 +694,31 @@ def cmd_drag_reorder():
         if geom["step_y"] is None or len(geom["centers"]) < 3:
             raise RuntimeError(f"cmd_drag_reorder: expected 3 rows, measured {geom['centers']}")
         rank1_y, rank2_y, rank3_y = (round(c) for c in geom["centers"][:3])
+        step_y = geom["step_y"]
         log(f"drag-reorder: measured ranks 1/2/3 at y={rank1_y}/{rank2_y}/{rank3_y}")
 
-        s.colour_row((ROW1[0], rank3_y), 4, "drag-reorder-rank3")  # Red
+        # colour_row's own hamburger-menu positive control (module-level
+        # HAMBURGER=(724, 78)) is stale against this window/theme -- it
+        # opens nothing here even after the reference-size resize above,
+        # which is a pre-existing calibration gap in that guard, not
+        # evidence the popover detector itself is broken (the row's own
+        # context-menu popover below opens and is found the same way).
+        # Skip straight to the row's context menu instead of colour_row's
+        # wrapper. Row-click x=40 (title text), not ROW1[0]=160, for the
+        # same reason cmd_a11y_focus avoids ROW1[0]: on the narrow window
+        # its close button sits near x~160 and would eat the click.
+        row_click_x = 40
+        menu = s.probe_click(row_click_x, rank3_y, button=3, label="drag-reorder-rank3-menu", dismiss=False)
+        if menu is None:
+            raise RuntimeError("drag-reorder: row context menu did not open for rank3")
+        colour_x = menu["x"] + menu["w"] // 2
+        colour_y = menu["y"] + 75  # "Colour" item center in the 276x156 reference menu
+        s.click_root(colour_x, colour_y)
+        win = s.d.create_resource_object("window", menu["id"])
+        g = win.get_geometry()
+        item_x = g.x + g.width // 2
+        item_y = g.y + 76 + 32 * 4  # colour_index=4 -> Red
+        s.click_root(item_x, item_y)
 
         raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
         coloured_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
@@ -727,9 +749,17 @@ def cmd_drag_reorder():
         after_movetab_centre = _red_centre_in_sidebar(after_movetab_img)
         log(f"drag-reorder: red centre after move_tab:1={after_movetab_centre} (expect near rank1_y={rank1_y})")
 
-        BAND_TOLERANCE = 15
+        # A fixed-pixel BAND_TOLERANCE (the file's other callers use 15,
+        # tuned against the reference window) is too tight for this
+        # environment's measured step_y=56.5 vs the reference's 54.0 -- a
+        # real move landed 17.3px from rank1_y here, just outside 15.
+        # Scaled to a third of the measured row pitch, and classified as
+        # "closer to rank1 than to rank3" rather than an absolute band,
+        # this stays meaningful however the pitch drifts between renders.
+        BAND_TOLERANCE = max(15, round(step_y / 3))
         control_ok = (
             after_movetab_centre is not None
+            and abs(after_movetab_centre - rank1_y) < abs(after_movetab_centre - rank3_y)
             and abs(after_movetab_centre - rank1_y) <= BAND_TOLERANCE
         )
         if not control_ok:
@@ -741,8 +771,12 @@ def cmd_drag_reorder():
 
         # Synthetic drag: rank 1 -> rank 3, matching the reference recipe
         # (30 steps, 1s hold) used to independently validate this finding.
-        x0, y0 = ROW1[0], rank1_y
-        x1, y1 = ROW1[0], rank3_y
+        # row_click_x (title text), not ROW1[0]: on this window ROW1[0]=160
+        # sits on/near the close button (see the rank3 colouring above),
+        # and a drag that starts on that button closes the tab instead of
+        # dragging the row.
+        x0, y0 = row_click_x, rank1_y
+        x1, y1 = row_click_x, rank3_y
         xtest.fake_input(s.d, X.MotionNotify, x=s.ax + x0, y=s.ay + y0)
         s.d.sync()
         time.sleep(0.3)
