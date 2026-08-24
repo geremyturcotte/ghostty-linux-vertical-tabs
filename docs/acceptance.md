@@ -23,12 +23,13 @@ Diffs the fork's `none` mode against upstream's GTK/GLib warnings and asserts
 `left`/`right` emit no CRITICAL. It exists because the `none` promise has been
 broken twice, and nothing but a human reading a log ever caught it.
 
-## Popover harness (XTEST)
+## XTEST harness
 
 ```bash
 .xvenv/bin/python3 scripts/acceptance-harness.py --hamburger      # positive control only
 .xvenv/bin/python3 scripts/acceptance-harness.py --menu           # Task 9: row context menu
 .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour  # Task 11: colour + scroll
+.xvenv/bin/python3 scripts/acceptance-harness.py --none-parity    # none-mode UI parity
 ```
 
 A GTK4 popover on X11 is a separate override-redirect X window, not a region
@@ -40,8 +41,18 @@ always runs the hamburger menu as a positive control in the same run before
 trusting any negative — that control requires a popup at least 200×200 (the
 real menu is 349×662), not just any override-redirect window, since a bare
 size-floor accepts the "Menu principal" tooltip GTK can show without the menu
-itself ever opening. Each mode launches its own isolated ghostty process and
-prints the popover's X window id plus a PNG under
+itself ever opening.
+
+`--none-parity` is a different kind of check: it verifies the UI-level half
+of the `none`-mode promise (tab bar present, no sidebar, no sidebar
+shortcut) that `scripts/check-none-parity.sh` structurally cannot, since
+that script only diffs GTK/GLib log output, never a pixel. It reuses the
+positive-control pattern (measuring `left` mode first, in the same run, to
+prove the pixel-based signals actually discriminate a sidebar-present state)
+and does not modify or replace `check-none-parity.sh`.
+
+Each mode launches its own isolated ghostty process and prints its evidence
+(a popover's X window id, or a structural pixel measurement) plus PNGs under
 `.prokai/tmp/dispatch-artifacts/` (gitignored, regenerated per run).
 
 ## Regression — the escape hatch
@@ -51,17 +62,63 @@ broken once, by a `GtkSingleSelection` that autoselected on an empty model and
 tripped an Adwaita assertion at window construction.
 
 - [ ] `--gtk-sidebar-tabs=none` is indistinguishable from upstream: tab bar
-      present, no sidebar, no sidebar shortcut. **Not measured by hand** —
-      this is exactly what `scripts/check-none-parity.sh` automates
-      (diffs `none` against upstream's GTK/GLib warnings). Left unchecked,
-      gated on that script's verdict on PR #7, not a manual pass here.
-- [ ] `none` produces **zero** `CRITICAL` lines. Compare against upstream:
+      present, no sidebar, no sidebar shortcut. **Measured, partial FAIL**
+      (`scripts/acceptance-harness.py --none-parity`) — `check-none-parity.sh`
+      cannot verify this claim at all: it only diffs GTK/GLib *log* output
+      (CRITICAL/WARNING/assertion lines), never a pixel or a widget, so it
+      can pass with a sidebar visibly on screen in `none` mode as long as the
+      logs happen to match. This is a genuinely different, UI-level check,
+      done with this harness's existing XTEST + `win.get_image()` method (the
+      same one already used two sections up for "`left`/`right` put the
+      sidebar on the correct side").
+
+      Two of the three sub-claims measure true: with 2 tabs open, a
+      horizontal tab-bar-style chrome row sits where `left` mode has none
+      (dominant pixel colour in that band is chrome-grey `(69,69,69)`, vs
+      `left` mode's terminal-background blue-grey `(40,44,52)` in the same
+      region — a same-run positive control on `left` mode confirms this
+      signal actually discriminates the two states), and the terminal's
+      shell prompt starts near the window's left edge (`x=143`) rather than
+      after a sidebar column (`left` mode: `x=317`, the same positive
+      control) — so no sidebar column is occupying space at launch.
+
+      The third sub-claim is **false**: `Ctrl+Shift+B` is not a no-op in
+      `none` mode. Screenshotting before and after the keypress shows a
+      16% pixel diff (reproduced twice, identical `0.16183` ratio both
+      times) — the horizontal tab bar disappears and a 2-row vertical
+      sidebar column appears in its place, indistinguishable from `left`
+      mode's layout. The sidebar toggle keybind still works even though
+      `--gtk-sidebar-tabs=none` is supposed to make the sidebar
+      unconditionally absent. This is a new instance of the exact failure
+      mode this section's intro describes ("already been broken once") —
+      found by this measurement, not fixed by it: fixing the keybind gate
+      is out of this worker's declared scope (docs + harness only) and
+      needs its own ticket. Left unchecked.
+- [x] `none` produces **zero** `CRITICAL` lines. Compare against upstream:
       ```bash
       ./zig-out/bin/ghostty --gtk-sidebar-tabs=none --quit-after-last-window-closed=true 2>&1 \
         | grep -c CRITICAL     # must be 0
       ```
-      **Not measured by hand** — same automated check as above, same gate on
-      PR #7. Not re-verified manually here.
+      **Measured**, and precisely scoped to what's actually guarded, because
+      the guard is narrower than this bullet's own wording suggests:
+      `check-none-parity.sh`'s hard "must be 0 `CRITICAL`" assertion loop
+      (`for mode in left right`) does not include `none` — `none` is only
+      *diffed against upstream's* log, which proves **parity with upstream**,
+      not an unconditional zero. If upstream ever emitted the same CRITICAL
+      line, that diff would still pass and this line would no longer be
+      true, silently. What's true **today**, reproduced directly (not via
+      the diff, a direct count on each binary):
+      ```
+      ./zig-out/bin/ghostty --gtk-sidebar-tabs=none --quit-after-last-window-closed=true 2>&1 | grep -c CRITICAL  # => 0
+      /usr/bin/ghostty --quit-after-last-window-closed=true 2>&1 | grep -c CRITICAL                              # => 0
+      ```
+      Checked on that basis: 0 and 0, today, reproducibly — not on the
+      stronger claim the bullet's own text implies. Making `none` a hard
+      zero-CRITICAL gate (adding it to the script's `for mode in ...` loop)
+      is a real fix, tracked as a follow-up *after* PR #7 merges, on a single
+      branch — `scripts/check-none-parity.sh` is untouched here since it's
+      byte-identical between PR #7 and this PR and changing it here would
+      reopen a conflict already resolved on PR #7.
 
 ## The sidebar itself
 

@@ -16,11 +16,17 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --hamburger
     .xvenv/bin/python3 scripts/acceptance-harness.py --menu
     .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour
+    .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
 fire the hamburger positive control first in the same run and refuse to
-report a negative if it fails.
+report a negative if it fails. --none-parity is a separate concern: it
+measures the UI-level half of `--gtk-sidebar-tabs=none`'s promise (tab bar
+present, no sidebar, no sidebar shortcut) via pixel structure rather than
+popover detection -- see cmd_none_parity()'s docstring. It does not modify
+or replace scripts/check-none-parity.sh, which only diffs GTK/GLib log
+output and cannot see a pixel or a widget.
 """
 import argparse
 import os
@@ -49,7 +55,7 @@ def log(msg):
     print(f"[harness] {msg}", flush=True)
 
 
-def launch_ghostty(extra_config=""):
+def launch_ghostty(extra_config="", sidebar_mode="left"):
     env = dict(os.environ)
     env["GDK_BACKEND"] = "x11"
     env["DISPLAY"] = env.get("DISPLAY", ":0")
@@ -57,7 +63,7 @@ def launch_ghostty(extra_config=""):
     cfgdir = tempfile.mkdtemp(prefix="acceptance-harness-xdg-")
     os.makedirs(os.path.join(cfgdir, "ghostty"), exist_ok=True)
     with open(os.path.join(cfgdir, "ghostty", "config"), "w") as f:
-        f.write("gtk-sidebar-tabs = left\n")
+        f.write(f"gtk-sidebar-tabs = {sidebar_mode}\n")
         f.write(extra_config)
     env["XDG_CONFIG_HOME"] = cfgdir
     proc = subprocess.Popen(
@@ -107,8 +113,8 @@ def find_ghostty_window(d, root, timeout=8.0):
 class Session:
     """One ghostty process + its X connection, window handle, and absolute origin."""
 
-    def __init__(self, extra_config=""):
-        self.proc = launch_ghostty(extra_config)
+    def __init__(self, extra_config="", sidebar_mode="left"):
+        self.proc = launch_ghostty(extra_config, sidebar_mode)
         time.sleep(6.0)  # window map + first paint settle (proven recipe)
         self.d = display.Display(os.environ.get("DISPLAY", ":0"))
         self.root = self.d.screen().root
@@ -427,11 +433,177 @@ def cmd_scroll_colour():
         s.close()
 
 
+# Terminal background is a distinct blue-gray (measured ~(40,44,52) across
+# this whole sweep's screenshots); GTK chrome (headerbar, tab bar, sidebar
+# row cards) is a near-neutral gray (~(69,69,69)). The invariant that holds
+# up across both: chrome has near-equal R/G/B, terminal background has B
+# distinctly greater than R.
+def _looks_like_chrome(px):
+    r, g, b = px[:3]
+    return (b - r) < 8
+
+
+def _prompt_text_x(img, y, thresh=150):
+    """First bright (near-white) pixel in row y -- the shell prompt's text
+    start. Used as the sidebar-column-occupancy signal: with a sidebar, the
+    terminal (and its prompt) starts well to the right of the column; with
+    none, the terminal spans the full width and the prompt starts near the
+    left edge."""
+    px = img.load()
+    for x in range(img.width):
+        r, g, b = px[x, y][:3]
+        if r > thresh and g > thresh and b > thresh:
+            return x
+    return None
+
+
+def _find_prompt_row(img, y0=100, y1=250, x_scan=(0, 900), thresh=150, min_count=5):
+    """Scan downward for the first row with substantial bright-pixel content
+    -- used to locate the shell prompt's y so _prompt_text_x can be measured
+    at a real text row rather than a guessed offset (fragile across window
+    states, as Task 11's post-scroll drift showed)."""
+    px = img.load()
+    for y in range(y0, y1):
+        n = 0
+        for x in range(*x_scan):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                n += 1
+                if n >= min_count:
+                    return y
+    return None
+
+
+def _measure_mode(sidebar_mode, label):
+    """Launch one mode with 2 tabs, screenshot, and return the two structural
+    signals: prompt_x (sidebar-column occupancy) and chrome_band (whether a
+    horizontal tab-bar-style chrome row sits between the headerbar and the
+    terminal)."""
+    s = Session(sidebar_mode=sidebar_mode)
+    try:
+        s.open_tabs(1)  # 2 tabs total
+        time.sleep(0.5)
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        shot_path = os.path.join(ARTIFACT_DIR, f"none-parity-{label}.png")
+        img.save(shot_path)
+
+        prompt_y = _find_prompt_row(img)
+        prompt_x = _prompt_text_x(img, prompt_y) if prompt_y is not None else None
+
+        # Sample the row-bar band (y=100-140, the AdwTabBar's expected
+        # position measured on the reference window) on the terminal side
+        # (x=460-900, clear of any sidebar column regardless of mode) and
+        # check whether the dominant colour there is chrome-grey (tab bar
+        # present) or terminal-background-blue (no tab bar, content already
+        # started).
+        px = img.load()
+        colour_counts = {}
+        for y in range(100, 140):
+            for x in range(460, min(900, s.ww)):
+                c = px[x, y][:3]
+                colour_counts[c] = colour_counts.get(c, 0) + 1
+        dominant = max(colour_counts, key=colour_counts.get)
+        chrome_band = _looks_like_chrome(dominant)
+
+        log(f"{label}: prompt_row_y={prompt_y} prompt_text_x={prompt_x} "
+            f"tab-bar-band dominant colour={dominant} chrome_like={chrome_band} -> {shot_path}")
+        return {"prompt_x": prompt_x, "chrome_band": chrome_band, "shot": shot_path}
+    finally:
+        s.close()
+
+
+def cmd_none_parity():
+    """UI-level parity check for `--gtk-sidebar-tabs=none`'s claim in
+    docs/acceptance.md: "tab bar present, no sidebar, no sidebar shortcut" --
+    an interface claim that scripts/check-none-parity.sh cannot verify since
+    it only diffs GTK/GLib log output, never a pixel or a widget (see that
+    finding's discussion in docs/acceptance.md). This does not replace or
+    modify check-none-parity.sh; it measures the half of the `none` promise
+    that script structurally cannot.
+
+    Positive control: measures `left` mode with the same method in the same
+    run first, to prove the two structural signals below actually
+    discriminate a sidebar-present state from a sidebar-absent one, rather
+    than just returning "absent" unconditionally."""
+    log("positive control: measuring `left` mode (sidebar expected present, no tab bar)")
+    left = _measure_mode("left", "left-control")
+    if left["prompt_x"] is None:
+        log("POSITIVE CONTROL FAILED — could not even locate `left` mode's terminal prompt")
+        return 2
+    if not (left["prompt_x"] > 150 and not left["chrome_band"]):
+        log(f"POSITIVE CONTROL FAILED — `left` mode did not show the expected sidebar signal "
+            f"(prompt_x={left['prompt_x']}, chrome_band={left['chrome_band']}); "
+            "refusing to trust the `none` measurement below")
+        return 2
+    log(f"positive control OK: left mode prompt_x={left['prompt_x']} (sidebar occupies the column), "
+        f"chrome_band={left['chrome_band']} (no tab bar)")
+
+    log("measuring `none` mode")
+    none = _measure_mode("none", "none-mode")
+
+    no_sidebar = none["prompt_x"] is not None and none["prompt_x"] < 150
+    tab_bar_present = none["chrome_band"] is True
+    log(f"none: no_sidebar={no_sidebar} (prompt_x={none['prompt_x']}) "
+        f"tab_bar_present={tab_bar_present} (chrome_band={none['chrome_band']})")
+
+    # "no sidebar shortcut": Ctrl+Shift+B should be a no-op in none mode.
+    s = Session(sidebar_mode="none")
+    try:
+        s.open_tabs(1)
+        time.sleep(0.5)
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        before = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        before.save(os.path.join(ARTIFACT_DIR, "none-parity-shortcut-before.png"))
+
+        ctrl_kc = s.d.keysym_to_keycode(0xFFE3)
+        shift_kc = s.d.keysym_to_keycode(0xFFE1)
+        b_kc = s.d.keysym_to_keycode(0x0062)  # b
+        xtest.fake_input(s.d, X.KeyPress, ctrl_kc)
+        xtest.fake_input(s.d, X.KeyPress, shift_kc)
+        xtest.fake_input(s.d, X.KeyPress, b_kc)
+        s.d.sync()
+        time.sleep(0.15)
+        xtest.fake_input(s.d, X.KeyRelease, b_kc)
+        xtest.fake_input(s.d, X.KeyRelease, shift_kc)
+        xtest.fake_input(s.d, X.KeyRelease, ctrl_kc)
+        s.d.sync()
+        time.sleep(1.0)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after.save(os.path.join(ARTIFACT_DIR, "none-parity-shortcut-after.png"))
+    finally:
+        s.close()
+
+    before_px, after_px = before.load(), after.load()
+    diff_pixels = sum(
+        1 for y in range(before.height) for x in range(before.width)
+        if before_px[x, y] != after_px[x, y]
+    )
+    total_pixels = before.width * before.height
+    diff_ratio = diff_pixels / total_pixels
+    no_shortcut = diff_ratio < 0.005  # cursor blink / AA jitter tolerance
+    log(f"none: Ctrl+Shift+B diff_ratio={diff_ratio:.5f} ({diff_pixels}/{total_pixels} px) "
+        f"no_shortcut_effect={no_shortcut}")
+
+    if no_sidebar and tab_bar_present and no_shortcut:
+        log("none-parity: PASS — tab bar present, no sidebar column, Ctrl+Shift+B is a no-op")
+        return 0
+    else:
+        log(f"none-parity: FAIL — no_sidebar={no_sidebar} tab_bar_present={tab_bar_present} "
+            f"no_shortcut={no_shortcut}")
+        return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hamburger", action="store_true", help="positive control only")
     ap.add_argument("--menu", action="store_true", help="Task 9: row context menu, with positive+negative controls")
     ap.add_argument("--scroll-colour", action="store_true", help="Task 11: 6 tabs, colour + scroll scenario")
+    ap.add_argument("--none-parity", action="store_true",
+                     help="none-mode UI parity: tab bar present, no sidebar, no sidebar shortcut")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -440,6 +612,8 @@ def main():
         return cmd_menu()
     if args.scroll_colour:
         return cmd_scroll_colour()
+    if args.none_parity:
+        return cmd_none_parity()
 
     ap.print_help()
     return 1
