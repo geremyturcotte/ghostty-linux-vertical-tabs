@@ -2172,33 +2172,36 @@ def cmd_section_header():
 
     s_git = Session(sidebar_mode="left", cwd=repo_dir)
     try:
+        # t0 is captured with only 1 tab, so its OWN frame cannot supply a
+        # trustworthy geometry: `_detect_tab_rows` needs an evenly-spaced RUN
+        # to reject noise, and any 2 points are trivially "evenly spaced"
+        # (one gap, nothing to compare it against) -- so a single stray
+        # terminal text line below the lone real row would be misread as a
+        # second row and hand back a bogus band. The geometry is instead
+        # derived once, below, from the 2-tab frame where a real 2-row run
+        # exists to validate against, and that same box crops BOTH frames.
         t0_img = s_git.screenshot()
-        box = _header_band_box(t0_img, s_git.wh)
-        if box is None:
-            return _abstain(
-                "could not derive the header band from a 1-tab frame",
-                f"window {s_git.ww}x{s_git.wh}: _measure_sidebar_column or "
-                "_detect_tab_rows didn't yield a usable geometry with only 1 row")
-        col, y0, y1 = box
-        log(f"section-header: band x=[0,{col}) y=[{y0},{y1}) (derived from a 2-row frame)")
-
-        t0 = t0_img.crop((0, y0, col, y1)).tobytes()
 
         s_git.focus_terminal()
         s_git.open_tabs(1)
         time.sleep(1.0)
         t1_img = s_git.screenshot()
-        # Re-derive with the now-2-row frame and require it agree with the
-        # 1-row box above -- if row 1 moved when row 2 was added, the two
-        # tabs landed in different sections (not the same-section scenario
-        # this mode measures) and the band comparison would be meaningless.
-        box2 = _header_band_box(t1_img, s_git.wh)
-        if box2 is None or box2 != box:
+
+        box = _header_band_box(t1_img, s_git.wh)
+        if box is None:
             return _abstain(
-                "header band geometry moved (or vanished) between 1 and 2 tabs",
-                f"1-tab box={box} 2-tab box={box2} -- the two tabs likely "
-                "landed in different sections instead of the same one this "
-                "mode requires")
+                "could not derive the header band from the 2-tab frame",
+                f"window {s_git.ww}x{s_git.wh}: _measure_sidebar_column or "
+                "_detect_tab_rows didn't yield a usable geometry")
+        col, y0, y1 = box
+        log(f"section-header: band x=[0,{col}) y=[{y0},{y1}) (derived from a 2-row frame)")
+
+        if t0_img.size != t1_img.size:
+            return _abstain(
+                "window resized between t0 and t1",
+                f"t0 size={t0_img.size} t1 size={t1_img.size}")
+
+        t0 = t0_img.crop((0, y0, col, y1)).tobytes()
         t1 = band(s_git, box)
     finally:
         s_git.close()
