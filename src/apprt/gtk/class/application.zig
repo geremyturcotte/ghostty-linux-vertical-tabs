@@ -1156,9 +1156,16 @@ pub const Application = extern struct {
         // Binding.zig, Surface.zig, apprt/action.zig and command.zig — core
         // files this fork has every reason not to own. A fixed accelerator
         // buys the keyboard gesture for one line in one GTK-local file.
+        //
+        // gtk-sidebar-tabs = none must leave upstream behaviour untouched, so
+        // the accelerator is not registered at all on that path — no
+        // shortcut, no effect, matching actionToggleSidebar's own guard.
         {
-            const accels = [_:null]?[*:0]const u8{"<Ctrl><Shift>b"};
-            self.as(gtk.Application).setAccelsForAction("win.toggle-sidebar", &accels);
+            const config = self.private().config.get();
+            if (config.@"gtk-sidebar-tabs" != .none) {
+                const accels = [_:null]?[*:0]const u8{"<Ctrl><Shift>b"};
+                self.as(gtk.Application).setAccelsForAction("win.toggle-sidebar", &accels);
+            }
         }
     }
 
