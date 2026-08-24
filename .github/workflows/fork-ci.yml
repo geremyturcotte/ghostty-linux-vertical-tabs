@@ -57,6 +57,7 @@ jobs:
           cd blueprint-compiler
           meson setup _build --prefix="$HOME/.local"
           ninja -C _build install
+          mkdir -p "$(python3 -m site --user-site)"
           echo "$HOME/.local/lib/python3/dist-packages" > "$(python3 -m site --user-site)/blueprintcompiler.pth"
 
       - name: Link gtk4-layer-shell (orphaned .so on Ubuntu 24.04)
