@@ -1,5 +1,14 @@
 on:
-  push: {}
+  # push is restricted to the trunks, not every branch: a branch under a PR
+  # already gets push+pull_request events on the same commit, which land in
+  # the same concurrency group — cancel-in-progress kills whichever started
+  # second AFTER it starts, and GitHub reports that as a `fail`, not a
+  # no-op. Measured: PR #7 showed one `pass` and one `fail` for the same
+  # commit, purely from this race, with a fully green build underneath.
+  # Restricting push here means the duplicate never starts, so main/sidebar
+  # still get push coverage for commits that land without a PR.
+  push:
+    branches: [main, sidebar]
   pull_request: {}
   workflow_dispatch: {}
 
