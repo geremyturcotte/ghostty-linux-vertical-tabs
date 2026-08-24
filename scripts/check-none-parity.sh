@@ -33,8 +33,16 @@ trap 'rm -rf "$tmp"' EXIT
 # about behaviour.
 noise() {
     # grep exits 1 on no match; an empty result is the good case here.
+    #
+    # 'Otherwise, please rebuild in a release mode.' is the CONTINUATION line
+    # of the debug-build warning ('debug build' is the first line, already
+    # filtered). A fork binary built with `zig build` (Debug) compared
+    # against upstream's Release package emits this every run — it says
+    # nothing about the sidebar, so both lines of the same warning must be
+    # filtered together or the pair silently reappears as a false parity
+    # break the next time the wording shifts by a line.
     grep -iE 'CRITICAL|WARNING|assertion' "$1" 2>/dev/null |
-        grep -viE 'debug build|performance will be|GDK_DEBUG|GDK_DISABLE|hsl\(' |
+        grep -viE 'debug build|rebuild in a release mode|performance will be|GDK_DEBUG|GDK_DISABLE|hsl\(' |
         sed 's/0x[0-9a-f]*//g' |
         sort -u || true
 }
@@ -48,13 +56,23 @@ noise() {
 # stayed up for the whole run, which is the healthy case here.
 RUN_RC=0
 run() {
+    # Each invocation gets its OWN fresh XDG_CONFIG_HOME. Ghostty writes a
+    # placeholder config.ghostty on first launch as a side effect; four
+    # invocations sharing one config dir (upstream, none, left, right) means
+    # whichever runs first leaves that empty file behind for the next one to
+    # trip over — upstream always runs first, so only the fork's runs ever
+    # saw the leftover and only the fork's logs ever complained about it.
+    # That's an ordering artifact of this script, not a caller's environment
+    # to isolate — a caller-supplied XDG_CONFIG_HOME would have the same bug.
+    xdg_home="$tmp/xdg-config-$(basename "$2" .log)"
+    mkdir -p "$xdg_home"
     # `cmd && rc=0 || rc=$?` and not `cmd; rc=$?`: under `set -e` a failing
     # command aborts the script before the assignment ever runs.
     if [ -n "${3:-}" ]; then
-        timeout 12 "$1" --quit-after-last-window-closed=true "$3" >"$2" 2>&1 &&
+        XDG_CONFIG_HOME="$xdg_home" timeout 12 "$1" --quit-after-last-window-closed=true "$3" >"$2" 2>&1 &&
             RUN_RC=0 || RUN_RC=$?
     else
-        timeout 12 "$1" --quit-after-last-window-closed=true >"$2" 2>&1 &&
+        XDG_CONFIG_HOME="$xdg_home" timeout 12 "$1" --quit-after-last-window-closed=true >"$2" 2>&1 &&
             RUN_RC=0 || RUN_RC=$?
     fi
     return 0
