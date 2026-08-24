@@ -300,8 +300,11 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       after a 1st arrow successfully navigated the list via `rowActivated`'s
       `grabFocus()` — does not occur, because its precondition (the list
       holding focus after arrow #1) never arises: **not even arrow #1** reaches
-      the list. Verdict: **ABSENT** (see PR #8, merged into this doc's history
-      on the `sidebar` branch as commit `5c5b75d27`). No code change made.
+      the list. Verdict: **ABSENT**. No code change made. The measurement was
+      made under PR #8 and is reported here in full; PR #8 itself is closed
+      without merging, because its copy of this document is an earlier state
+      of it — merging that copy would un-check twenty measurements recorded
+      since. Nothing above depends on that branch still existing.
 
 ## Synchronization
 
