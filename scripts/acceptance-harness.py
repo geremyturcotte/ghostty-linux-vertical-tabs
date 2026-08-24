@@ -1401,9 +1401,46 @@ def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH):
     before_px, after_px = before.load(), after.load()
     w = min(col_width, before.width, after.width)
     h = min(before.height, after.height)
-    diff = sum(1 for y in range(h) for x in range(w) if before_px[x, y] != after_px[x, y])
-    total = w * h
+    y0 = _chrome_bottom(before, col_width)
+    diff = sum(1 for y in range(y0, h) for x in range(w)
+               if before_px[x, y] != after_px[x, y])
+    total = w * (h - y0)
     return diff / total if total else 0.0
+
+
+def _chrome_bottom(img, col_width):
+    """First y BELOW the window's top chrome — measured, not guessed.
+
+    The header bar spans the FULL width of the window, so it also occupies
+    x < col_width. Diffing the "sidebar column" over the full height therefore
+    counts the TITLE BAR as if it were sidebar.
+
+    That is not hypothetical: pressing Ctrl+Shift+B in `gtk-sidebar-tabs=none`
+    rings the terminal bell -- the key is bound to nothing, reaches the shell,
+    and it beeps -- and the fork paints a bell marker in the title. Measured on
+    three binaries with one variable, all three ring it:
+
+        upstream 1.3.1        title-band diff 0.09183
+        fork without the PR   title-band diff 0.09173
+        fork with the PR      title-band diff 0.09173
+
+    So the bell is UPSTREAM behaviour, and a guard that counts it reports a
+    parity break that does not exist. This guard produced exactly that false
+    red once before this bound existed.
+
+    Derivation, with no constant: walk down the left edge (inside the column)
+    and the right edge (necessarily terminal). While both sides are the same
+    colour we are still in chrome that spans the window; the first row where
+    they differ is where the sidebar/terminal split actually begins.
+    """
+    px = img.load()
+    w, h = img.width, img.height
+    right = min(w - 8, w - 1)
+    left = min(8, w - 1)
+    for y in range(h):
+        if px[left, y][:3] != px[right, y][:3]:
+            return y
+    return 0
 
 
 def _shortcut_column_diff(sidebar_mode, label, col_width=None):
