@@ -139,20 +139,6 @@ pub const Tab = extern struct {
                 },
             );
         };
-
-        /// See `Private.working_directory`.
-        pub const @"working-directory" = struct {
-            pub const name = "working-directory";
-            const impl = gobject.ext.defineProperty(
-                name,
-                Self,
-                ?[:0]const u8,
-                .{
-                    .default = null,
-                    .accessor = C.privateStringFieldAccessor("working_directory"),
-                },
-            );
-        };
     };
 
     pub const signals = struct {
@@ -181,15 +167,6 @@ pub const Tab = extern struct {
 
         /// The tooltip of this tab. This is usually bound to the active surface.
         tooltip: ?[:0]const u8 = null,
-
-        /// The working directory this tab was *created* with, i.e. the
-        /// `working_directory` override passed to `new` — not the surface's
-        /// live, shell-reported `pwd`. It never changes after construction.
-        /// Most tabs (anything opened via a keybind rather than an explicit
-        /// `--working-directory`) never set an override, so this is `null`
-        /// far more often than not. Exists so the sidebar can group tabs
-        /// without re-deriving this at every access.
-        working_directory: ?[:0]const u8 = null,
 
         // Template bindings
         split_tree: *SplitTree,
@@ -231,11 +208,6 @@ pub const Tab = extern struct {
         }
 
         tab.as(gobject.Object).notifyByPspec(properties.config.impl.param_spec);
-
-        priv.working_directory = if (overrides.working_directory) |wd|
-            glib.ext.dupeZ(u8, wd)
-        else
-            null;
 
         // Create our initial surface in the split tree.
         priv.split_tree.newSplit(.right, null, .{
@@ -316,12 +288,6 @@ pub const Tab = extern struct {
         return self.getSplitTree().getActiveSurface();
     }
 
-    /// The working directory this tab was created with. See
-    /// `Private.working_directory`.
-    pub fn getWorkingDirectory(self: *Self) ?[:0]const u8 {
-        return self.private().working_directory;
-    }
-
     /// Get the surface tree of this tab.
     pub fn getSurfaceTree(self: *Self) ?*Surface.Tree {
         const priv = self.private();
@@ -389,10 +355,6 @@ pub const Tab = extern struct {
         if (priv.title_override) |v| {
             glib.free(@ptrCast(@constCast(v)));
             priv.title_override = null;
-        }
-        if (priv.working_directory) |v| {
-            glib.free(@ptrCast(@constCast(v)));
-            priv.working_directory = null;
         }
 
         gobject.Object.virtual_methods.finalize.call(
@@ -605,7 +567,6 @@ pub const Tab = extern struct {
                 properties.title.impl,
                 properties.@"title-override".impl,
                 properties.tooltip.impl,
-                properties.@"working-directory".impl,
             });
 
             // Bindings

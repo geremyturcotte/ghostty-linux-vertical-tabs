@@ -5,14 +5,16 @@ const std = @import("std");
 /// instead of repo root, some other notion of "project" — this is the only
 /// function that should need to change.
 ///
-/// The operator asked to segment tabs "by repository", not "by directory",
-/// so the key is the working directory's git repository root, found by
-/// walking up looking for `.git`. Two fallbacks, both deliberate:
+/// The operator asked to segment tabs "by repository" ("dossier courant"),
+/// not "by directory" — the caller passes the active surface's *live*
+/// `pwd` (`sidebar-row.blp`'s subtitle already reads the same property), so
+/// the key follows a tab across a `cd`, not just at creation. The key is
+/// that directory's git repository root, found by walking up looking for
+/// `.git`. Two fallbacks, both deliberate:
 ///
-///   - `working_directory == null` (the common case — see `Tab.zig`'s
-///     `working_directory` field doc: most tabs are opened without an
-///     explicit override) maps to the empty string, the "ungrouped"
-///     sentinel key.
+///   - `working_directory == null` (no surface yet, or the shell hasn't
+///     reported a pwd) maps to the empty string, the "ungrouped" sentinel
+///     key.
 ///   - a working directory outside any git repository maps to itself, so
 ///     tabs in unrelated non-repo directories don't collapse into one
 ///     group.
