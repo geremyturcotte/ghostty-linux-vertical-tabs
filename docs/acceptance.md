@@ -49,25 +49,38 @@ of the `none`-mode promise (tab bar present, no sidebar, no sidebar
 shortcut) that `scripts/check-none-parity.sh` structurally cannot, since
 that script only diffs GTK/GLib log output, never a pixel. It reuses the
 positive-control pattern (measuring `left` mode first, in the same run, to
-prove the pixel-based signals actually discriminate a sidebar-present state)
+prove the structural signals actually discriminate a sidebar-present state)
 and does not modify or replace `check-none-parity.sh`. It refuses to launch
 on top of a still-running instance of the same binary (a stray one skews
 window placement for the next launch and produced one flaky reading during
-review), and re-measures its pixel signals until two consecutive readings
-agree rather than trusting a single screenshot after a fixed sleep.
+review — the guard compares each candidate process's *actual executable*
+via `/proc/<pid>/exe`, not `pgrep -f`'s command-line text match, which a
+second review caught matching an unrelated process that merely mentioned the
+binary's path as a string), and re-measures its structural signals until two
+consecutive readings agree rather than trusting a single screenshot after a
+fixed sleep. Its "is a sidebar/tab-bar present" signals are deliberately
+insensitive to how much chrome stacks above the terminal (headerbar, tab
+bar, a Debug build's own banner) — an earlier fixed-offset version was found,
+via independent review cross-testing against a Debug binary, to misread the
+debug banner as the tab bar and the banner's own text as the shell prompt.
 
-`--none-shortcut` is a stricter, dedicated companion to `--none-parity`'s own
-Ctrl+Shift+B check: it diffs only the sidebar's own column (x<260), not the
-whole window, because a whole-window diff ratio doesn't discriminate this
-case (a sidebar appearing on one side and the terminal reflowing on the
-other measured ~2% either way, sidebar-toggle or not), and it runs a
+`--none-shortcut` is a stricter, dedicated companion using the SAME
+sidebar-column-restricted detector `--none-parity` uses for its own
+Ctrl+Shift+B check (x<260, not the whole window — a whole-window diff ratio
+doesn't discriminate this case, since a sidebar appearing on one side and
+the terminal reflowing on the other nets out to a similar percentage either
+way), so the two commands can't disagree on the same binary the way an
+earlier, independently-implemented whole-window check once did. Runs a
 same-run positive control confirming the identical gesture produces a large
-column diff in `left` mode — a no-op check that couldn't detect a real
-toggle either would prove nothing. Confirms the same finding `--none-parity`
-already reported: measured a 55% column diff in `none` mode (vs. `left`
-mode's 59% for the same gesture) — nearly identical magnitude, meaning the
-sidebar isn't producing a smaller side effect in `none` mode, it's fully
-toggling exactly as it does in `left` mode.
+column diff in `left` mode. Also measures, informationally, whether upstream
+Ghostty leaks the same unbound key onto its own terminal prompt for the
+identical gesture (content-based: does new text appear at the end of the
+prompt's own line, found via the LAST contiguous text-row-group in the
+window, not a fixed offset, since that too was found to land on a Debug
+banner's row instead of the prompt) — skipped, rather than reported
+misleadingly, whenever the sidebar column itself just changed, since a
+reflowed terminal's wrapped prompt produces the same "text end moved" signal
+for an unrelated reason.
 
 Each mode launches its own isolated ghostty process and prints its evidence
 (a popover's X window id, or a structural pixel measurement) plus PNGs under
@@ -80,42 +93,73 @@ broken once, by a `GtkSingleSelection` that autoselected on an empty model and
 tripped an Adwaita assertion at window construction.
 
 - [ ] `--gtk-sidebar-tabs=none` is indistinguishable from upstream: tab bar
-      present, no sidebar, no sidebar shortcut. **Measured, partial FAIL**
-      (`scripts/acceptance-harness.py --none-parity`) — `check-none-parity.sh`
-      cannot verify this claim at all: it only diffs GTK/GLib *log* output
-      (CRITICAL/WARNING/assertion lines), never a pixel or a widget, so it
-      can pass with a sidebar visibly on screen in `none` mode as long as the
-      logs happen to match. This is a genuinely different, UI-level check,
-      done with this harness's existing XTEST + `win.get_image()` method (the
-      same one already used two sections up for "`left`/`right` put the
-      sidebar on the correct side").
+      present, no sidebar, no sidebar shortcut. **Measured, partial FAIL on
+      this branch (`sidebar`) — a fix exists, unmerged, on a separate PR.**
+      `check-none-parity.sh` cannot verify this claim at all: it only diffs
+      GTK/GLib *log* output, never a pixel or a widget, so it can pass with a
+      sidebar visibly on screen in `none` mode as long as the logs happen to
+      match. `scripts/acceptance-harness.py --none-parity` and
+      `--none-shortcut` measure the UI directly, with the same XTEST +
+      `win.get_image()` method already used two sections up for
+      "`left`/`right` put the sidebar on the correct side".
 
-      Two of the three sub-claims measure true: with 2 tabs open, a
-      horizontal tab-bar-style chrome row sits where `left` mode has none
-      (dominant pixel colour in that band is chrome-grey `(69,69,69)`, vs
-      `left` mode's terminal-background blue-grey `(40,44,52)` in the same
-      region — a same-run positive control on `left` mode confirms this
-      signal actually discriminates the two states), and the terminal's
-      shell prompt starts near the window's left edge (`x=143`) rather than
-      after a sidebar column (`left` mode: `x=317`, the same positive
-      control) — so no sidebar column is occupying space at launch.
+      Two of the three sub-claims measure true, using two signals designed
+      to be insensitive to how much chrome (headerbar, tab bar, a Debug
+      build's own banner) stacks above the terminal, since a fixed-offset
+      version of this check was found (independent review, cross-testing
+      against a Debug binary) to misread a debug banner as the tab bar and
+      the banner's own text as the shell prompt — see `_sidebar_column_signal`
+      and `_terminal_start_y`'s docstrings for the redesign. A horizontal
+      tab-bar-style chrome row sits above the terminal in `none` mode that
+      isn't there in `left` mode (`terminal_start_y` differs by 40px between
+      the two, measured in the same run against the same binary so any
+      *other* chrome, like a debug banner, contributes equally to both and
+      cancels out of the comparison); and the sidebar's own column (sampled
+      well below any chrome, immune to how tall it is) reads as plain
+      terminal background in `none` mode vs. sidebar chrome in `left` mode
+      (a same-run positive control on `left` mode confirms this signal
+      actually discriminates the two states).
 
-      The third sub-claim is **false**: `Ctrl+Shift+B` is not a no-op in
-      `none` mode. Screenshotting before and after the keypress shows a
-      16% pixel diff (reproduced twice, identical `0.16183` ratio both
-      times) — the horizontal tab bar disappears and a 2-row vertical
-      sidebar column appears in its place, indistinguishable from `left`
-      mode's layout. The sidebar toggle keybind still works even though
+      The third sub-claim is **false on this branch**: `Ctrl+Shift+B` is not
+      a no-op in `none` mode. Measured on the sidebar's own column
+      specifically (x<260, not the whole window — a whole-window diff picks
+      up unrelated terminal-side effects and mislabels them "the sidebar
+      toggled"; see `_shortcut_column_diff`'s docstring) — 55% of that column
+      changes, matching `left` mode's 59% for the identical gesture almost
+      exactly. The sidebar toggle keybind still works even though
       `--gtk-sidebar-tabs=none` is supposed to make the sidebar
       unconditionally absent. This is a new instance of the exact failure
-      mode this section's intro describes ("already been broken once") —
-      found by this measurement, not fixed by it: fixing the keybind gate
-      is out of this worker's declared scope (docs + harness only) and
-      needs its own ticket. Left unchecked. Confirmed independently by
-      `scripts/acceptance-harness.py --none-shortcut`, a stricter,
-      dedicated check with its own positive control (see the harness usage
-      section above) — 55% sidebar-column diff in `none` mode vs. 59% for
-      the identical gesture in `left` mode, essentially the same toggle.
+      mode this section's intro describes ("already been broken once").
+      **A fix exists**: cross-testing this same harness against PR #12
+      (branch `none-inert`, not yet merged) confirms it resolves this
+      sub-claim — 0% sidebar-column diff for the identical gesture, both
+      `--none-parity` and `--none-shortcut` PASS. Confirming a fix exists
+      elsewhere doesn't change this measurement of the `sidebar` branch as
+      it stands today: left unchecked here; the fix lands on its own PR.
+
+      One measurement mistake worth recording since it briefly produced a
+      wrong root-cause theory: an unbound `Ctrl+Shift+B` still reaches the
+      terminal and echoes a raw `8;6u` (CSI-u) sequence plus a bell — on
+      PR #12's fixed binary this looked at first like a still-broken
+      shortcut, but content-based comparison (not a whole-window pixel diff,
+      which would conflate two different windows' title/banner/font
+      differences with the one thing actually comparable) shows *upstream
+      does the exact same thing* for the identical gesture: prompt-line text
+      end moved from x=690 to x=740 on both binaries, an exact match.
+      Independently corroborated via `ghostty +list-keybinds --default`:
+      both binaries print 72 default binds and neither includes
+      Ctrl+Shift+B — the sidebar toggle is a GTK accelerator, invisible to
+      the keybind table, on both sides. So once the sidebar column itself
+      stops responding (PR #12's fix), the leaked escape sequence is not a
+      remaining defect — it's what any unbound key does on both upstream and
+      the fork, and `none` mode would then be genuinely indistinguishable
+      from upstream on all three sub-claims. This comparison isn't
+      meaningful on the *current*, unfixed `sidebar` branch: the sidebar
+      column itself changes width when it toggles, which reflows the
+      prompt's wrapped text and produces the same "text end moved" signal
+      for an unrelated reason — `scripts/acceptance-harness.py
+      --none-shortcut` detects this confound and skips the comparison
+      rather than reporting a number that isn't causally meaningful.
 - [x] `none` produces **zero** `CRITICAL` lines. Compare against upstream:
       ```bash
       ./zig-out/bin/ghostty --gtk-sidebar-tabs=none --quit-after-last-window-closed=true 2>&1 \
