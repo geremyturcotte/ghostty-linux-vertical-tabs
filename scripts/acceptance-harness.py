@@ -473,9 +473,22 @@ def cmd_menu():
         neg = s.probe_click(*TAB_OVERVIEW, button=1, label="tab-overview-in-window-control")
         if neg is not None:
             log("NOTE: in-window negative control unexpectedly produced an override-redirect window")
-        result = s.probe_click(*ROW1, button=3, label="row-context-menu")
+        # Measure the first row instead of trusting ROW1's hardcoded y.
+        # ROW1 = (160, 133) was measured on a build whose sidebar starts
+        # with a tab row. On the by-repository-sections build (PR #10) the
+        # first thing at that y is a SECTION HEADER, which has no context
+        # menu -- so this probe reported "row-context-menu confirmed
+        # ABSENT" on a build where the menu works fine. A negative that
+        # depends on which build you happen to be pointing at is not a
+        # measurement. measure_row_geometry() finds the rows by their close
+        # button, so it lands on a real row on either build.
+        geom = s.measure_row_geometry()
+        row1_y = round(geom["row1_y"])
+        log(f"menu: row centers measured at {geom['centers']} -- right-clicking y={row1_y}")
+        result = s.probe_click(ROW1[0], row1_y, button=3, label="row-context-menu")
         if result is None:
-            log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run)")
+            log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run, "
+                f"and the right-click landed on a MEASURED row center y={row1_y}, not a guessed one)")
             return 1
         log(f"row-context-menu: PRESENT — 0x{result['id']:x} {result['w']}x{result['h']} -> {result['png']}")
         return 0
@@ -967,7 +980,13 @@ def cmd_panes():
                 if diff_ratio(prev_snap, snap) > CHANGED:
                     log(f"panes: clicked pane row {label} (attempt {attempt}) -> {path}")
                     return snap, path
-            log(f"panes: clicked pane row {label} {retries}x, still no visible change -> {path}")
+            # Not necessarily a failure: a row that is ALREADY the active
+            # pane must not change anything when clicked. Saying "still no
+            # visible change" reads as "the click was dropped" and invites
+            # exactly the wrong conclusion -- it did, on a run that ended
+            # PASS. The verdict is the ratio triplet below, never this line.
+            log(f"panes: clicked pane row {label} {retries}x with no visible change -> {path} "
+                "(expected when that row is already the active pane; the ratio triplet decides)")
             return snap, path
 
         # Which detected row is the (already active) /tmp one and which is
