@@ -68,8 +68,21 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
 
 - [ ] Move the pointer slowly across every row **without clicking**. The active
       terminal must not change.
-- [ ] Arrow-key through the sidebar. Note the behaviour and confirm it is the
-      same every time.
+- [x] Arrow-key through the sidebar. Note the behaviour and confirm it is the
+      same every time. **Measured** (XTEST-driven live run, `zig-out/bin/ghostty`
+      rebuilt post-sidebar, DISPLAY=:0, 3 tabs): clicking a row activates it and
+      immediately returns focus to the terminal (`sidebar.zig:121`, by design).
+      From there, the sidebar `GtkListView` never holds keyboard focus again —
+      there is no click, keybind, or Tab path that gives it focus without also
+      activating a row. So every arrow press (Down/Down/Up/Up tried) lands in
+      the terminal as an ordinary readline keystroke (history recall / bell),
+      never touching the sidebar list, and the sidebar selection never moves.
+      Behaviour is identical on every press. The feared regression — a 2nd
+      arrow leaking to the terminal after a 1st arrow successfully navigated
+      the list via `rowActivated`'s `grabFocus()` — does not occur, because
+      its precondition (the list holding focus after arrow #1) never arises:
+      **not even arrow #1** reaches the list. Verdict: **ABSENT**. No code
+      change made.
 
 ## Synchronization
 
