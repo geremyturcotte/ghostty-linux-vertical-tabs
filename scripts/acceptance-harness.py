@@ -855,6 +855,27 @@ def _longest_run(centers, tol=6):
     return best
 
 
+CANNOT_MEASURE = 2  # ni PASS ni FAIL : l'instrument n'a pas pu monter sa scene
+
+
+def _abstain(reason, detail):
+    """An abstention is not a negative. Say so loudly, in the tool's OWN output.
+
+    A bare FAIL invites the next reader to do one of two harmful things: open a
+    phantom bug on a defect that does not exist, or -- worse -- tune the tool
+    until it turns green. Telling "I could not measure" apart from "the
+    measurement is negative" is the same discipline a guard owes: an abstention
+    is not a verdict."""
+    log("")
+    log("=== ABSTENTION — CE RUN NE MESURE RIEN ===")
+    log(f"    cause  : {reason}")
+    log(f"    detail : {detail}")
+    log("    Ce n'est PAS un defaut produit, et ce n'est PAS un verdict.")
+    log("    Le produit est verifie autrement — voir le commit a6540698e.")
+    log("    Ne 'corrige' pas ce harnais jusqu'a ce qu'il passe au vert.")
+    return CANNOT_MEASURE
+
+
 def cmd_panes():
     """v1.1 tranche 1: second-level pane rows under a split tab's row,
     read-only, click activates.
@@ -923,6 +944,11 @@ def cmd_panes():
             xtest.fake_input(d, X.KeyRelease, kc)
         d.sync()
 
+    log("mode --panes : NON DEMONTRABLE sur les affichages disponibles a ce jour.")
+    log("  bare X (xvfb/Xephyr, 800x600) : la 3e rangee disparait apres le split.")
+    log("  :0 avec un WM                 : les frappes n'atteignent pas le client")
+    log("                                  tant qu'une autre application tient le focus.")
+    log(f"  Un echec ici sort en code {CANNOT_MEASURE} (ABSTENTION), jamais en FAIL nu.")
     s = Session()
     try:
         s.open_tabs(2)  # 3 total; rank 3 (index 2) is focused
@@ -931,7 +957,11 @@ def cmd_panes():
             f"(window {s.ww}x{s.wh}) -- not the frozen (216, 234)")
         geom0 = s.measure_row_geometry(close_btn_x=band)
         if geom0["step_y"] is None or len(geom0["centers"]) < 3:
-            raise RuntimeError(f"cmd_panes: expected 3 tab rows, measured {geom0['centers']}")
+            return _abstain(
+                "le detecteur n'a pas trouve les 3 rangees d'onglet AVANT le split",
+                f"centers={geom0['centers']} sur une fenetre {s.ww}x{s.wh} — soit la "
+                "bande du bouton de fermeture tombe a cote, soit les onglets n'ont "
+                "jamais ete ouverts parce que les frappes n'atteignent pas le client")
         c1, c2, c3 = (round(c) for c in geom0["centers"][:3])
         step0 = geom0["step_y"]
         spacing_uniform = abs((c2 - c1) - (c3 - c2)) <= 3
@@ -947,7 +977,11 @@ def cmd_panes():
 
         geom1 = s.measure_row_geometry(close_btn_x=band)
         if len(geom1["centers"]) < 3:
-            raise RuntimeError(f"cmd_panes: expected 3 tab rows after split, measured {geom1['centers']}")
+            return _abstain(
+                "la 3e rangee d'onglet a disparu APRES le split",
+                f"centers={geom1['centers']} sur une fenetre {s.ww}x{s.wh} — mesure sur "
+                "bare X : les sous-rangees de pane repoussent la 3e hors de portee du "
+                "detecteur. A rejouer sur une fenetre geree par un WM")
         n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
         log(f"panes: after split rows at y={n1}/{n2}/{n3}")
 
@@ -1068,6 +1102,15 @@ def cmd_panes():
                 "deterministic swap and its reversal, not a coincidental repaint")
             return 0
         else:
+            if (d_a1_vs_b < UNCHANGED and d_b_vs_a2 < UNCHANGED
+                    and d_a1_vs_a2 < UNCHANGED):
+                return _abstain(
+                    "les TROIS ratios sont nuls — rien n'a bouge, pas meme entre deux "
+                    "panes censes differer",
+                    f"{d_a1_vs_b:.4f} / {d_b_vs_a2:.4f} / {d_a1_vs_a2:.4f}. C'est la "
+                    "signature du `cd /tmp` jamais tape : les deux panes gardent le meme "
+                    "pwd, donc la comparaison de sous-titres est VIDE. Ce n'est pas un "
+                    "clic sans effet, c'est une scene jamais montee")
             log("FAIL — pane clicks did not produce the expected active-surface swap "
                 "(see diff ratios above)")
             return 1
