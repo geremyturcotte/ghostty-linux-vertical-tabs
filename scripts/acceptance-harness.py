@@ -17,16 +17,23 @@ Usage (run with the repo's isolated venv, from the repo root):
     .xvenv/bin/python3 scripts/acceptance-harness.py --menu
     .xvenv/bin/python3 scripts/acceptance-harness.py --scroll-colour
     .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity
+    .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut
+    .xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder
 
 Every mode launches its own ghostty process against an isolated
 XDG_CONFIG_HOME and terminates it on exit. --menu and --scroll-colour always
 fire the hamburger positive control first in the same run and refuse to
-report a negative if it fails. --none-parity is a separate concern: it
-measures the UI-level half of `--gtk-sidebar-tabs=none`'s promise (tab bar
-present, no sidebar, no sidebar shortcut) via pixel structure rather than
-popover detection -- see cmd_none_parity()'s docstring. It does not modify
-or replace scripts/check-none-parity.sh, which only diffs GTK/GLib log
-output and cannot see a pixel or a widget.
+report a negative if it fails. --none-parity and --none-shortcut are a
+separate concern: they measure the UI-level half of `--gtk-sidebar-tabs=none`'s
+promise (tab bar present, no sidebar, no sidebar shortcut) via pixel
+structure rather than popover detection -- see cmd_none_parity()'s and
+cmd_none_shortcut()'s docstrings. Neither modifies or replaces
+scripts/check-none-parity.sh, which only diffs GTK/GLib log output and
+cannot see a pixel or a widget. --drag-reorder measures whether GTK4 DND
+actually reorders sidebar rows, using a move_tab:1 positive control (wired
+via a custom keybind this mode adds to its own launch config) to prove
+reordering is observable before trusting a synthetic-drag negative -- see
+cmd_drag_reorder()'s docstring.
 """
 import argparse
 import os
@@ -55,7 +62,70 @@ def log(msg):
     print(f"[harness] {msg}", flush=True)
 
 
+def _find_stray_ghostty_pids():
+    """PIDs whose actual executable (/proc/<pid>/exe, resolved) is this exact
+    binary. Deliberately NOT `pgrep -f GHOSTTY_BIN`: -f matches the full
+    command line text of ANY process, so a shell merely containing the
+    binary's path as a string (e.g. in a command it's about to run, or in
+    its scrollback) is indistinguishable from a live ghostty process to
+    pgrep -- caught in review: an operator's own shell was matched and the
+    guard below refused to launch against a process that wasn't ghostty at
+    all. Comparing the resolved executable path is the actual measurement;
+    command-line text is a coincidence, not evidence."""
+    target = os.path.realpath(GHOSTTY_BIN)
+    pids = []
+    try:
+        entries = os.listdir("/proc")
+    except FileNotFoundError:
+        return pids  # no /proc -- can't check, proceed as before
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            exe = os.readlink(f"/proc/{entry}/exe")
+        except OSError:
+            continue  # process exited mid-scan, or exe unreadable -- not ours
+        if exe == target:
+            pids.append(entry)
+    return pids
+
+
+def _wait_for_no_stray_ghostty(timeout=8.0):
+    """Refuse to launch on top of a still-running instance of this exact
+    binary. A stray process from a prior run (this harness's own cleanup
+    failing to land in time, or a previous invocation killed mid-run) makes
+    the window manager place the new window at an offset from the expected
+    origin -- observed directly: abs=(139,177) instead of (89,127), with the
+    sidebar not yet fully painted, which produced one flaky positive-control
+    reading (prompt_text_x=117 instead of ~317). The positive control caught
+    that flake and correctly refused to trust the result, but the fix
+    belongs here, at the root cause, not just in the guard that noticed it."""
+    deadline = time.time() + timeout
+    while True:
+        pids = _find_stray_ghostty_pids()
+        if not pids:
+            return
+        if time.time() >= deadline:
+            raise RuntimeError(
+                f"refusing to launch: {GHOSTTY_BIN} already running (pid {', '.join(pids)}) "
+                f"after waiting {timeout}s -- a stray instance from a prior run skews window "
+                "placement for the new one. Kill it and retry."
+            )
+        time.sleep(0.5)
+
+
 def launch_ghostty(extra_config="", sidebar_mode="left"):
+    if not os.path.exists(GHOSTTY_BIN):
+        raise RuntimeError(
+            f"no ghostty binary at {GHOSTTY_BIN} (GHOSTTY_BIN is REPO_ROOT/zig-out/bin/ghostty, "
+            f"REPO_ROOT={REPO_ROOT}). Either build one there (`zig build --search-prefix "
+            "\"$HOME/.local\"`), or if you're testing against a binary built elsewhere, "
+            "symlink it in: `mkdir -p zig-out/bin && ln -sf <path-to-binary> zig-out/bin/ghostty` "
+            "-- this symlink is gitignored (zig-out/) and must be re-created any time it's "
+            "missing; a bare Popen() against a missing path fails with an unhelpful raw "
+            "FileNotFoundError instead of this message, which is why this check exists."
+        )
+    _wait_for_no_stray_ghostty()
     env = dict(os.environ)
     env["GDK_BACKEND"] = "x11"
     env["DISPLAY"] = env.get("DISPLAY", ":0")
@@ -270,6 +340,70 @@ class Session:
         item_y = g.y + 76 + 32 * colour_index
         self.click_root(item_x, item_y)
 
+    def measure_row_geometry(self, close_btn_x=(216, 234), y_scan=(60, None)):
+        """Measure the actual y-center of each visible sidebar row and the
+        spacing between them, instead of trusting a hardcoded constant.
+        ROW_STEP_Y=66 (guessed from a single early measurement) was found,
+        independent review, to be wrong -- the true spacing is 54.0px,
+        uniform across rows, measured by locating each row's close ("x")
+        button (a small bright glyph in a fixed x-band) and taking the
+        median gap between consecutive centers. A click computed from the
+        wrong constant misses the row card starting at row 3
+        (ROW1[1] + 2*66 = 265 vs the real row 3 center at 240.5) and a
+        band-tolerance check derived from it holds only by chance at row 2
+        and would fail at row 3. Measuring this at runtime instead of
+        hardcoding it also makes row-targeting immune to row-height
+        variation (a missing subtitle, a different font, HiDPI scale) the
+        same way the chrome-agnostic redesign made --none-parity immune to
+        a debug build's banner.
+
+        Returns {"row1_y": float, "step_y": float or None, "centers": [...]}.
+        step_y is None if fewer than 2 rows were detected (nothing to take
+        a spacing from); raises if zero rows were detected at all."""
+        y0, y1 = y_scan
+        y1 = y1 or self.wh
+        raw = self.win.get_image(0, 0, self.ww, self.wh, X.ZPixmap, 0xFFFFFFFF)
+        img = Image.frombytes("RGB", (self.ww, self.wh), raw.data, "raw", "BGRX")
+        px = img.load()
+        x0, x1 = close_btn_x
+        x1 = min(x1, self.ww)
+        thresh = 150
+
+        rows_with_btn = []
+        for y in range(y0, y1):
+            has = False
+            for x in range(x0, x1):
+                r, g, b = px[x, y][:3]
+                if r > thresh and g > thresh and b > thresh:
+                    has = True
+                    break
+            rows_with_btn.append(has)
+
+        groups = []
+        gap = 999
+        for i, has in enumerate(rows_with_btn):
+            if has:
+                if gap > 3:
+                    groups.append([y0 + i, y0 + i])
+                else:
+                    groups[-1][1] = y0 + i
+                gap = 0
+            else:
+                gap += 1
+
+        centers = [(g0 + g1) / 2 for g0, g1 in groups]
+        if not centers:
+            raise RuntimeError("measure_row_geometry: no sidebar rows detected -- "
+                                "is the sidebar visible and at least one tab open?")
+
+        step_y = None
+        if len(centers) >= 2:
+            diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
+            step_y = diffs[len(diffs) // 2]  # median
+
+        log(f"measure_row_geometry: centers={centers} step_y={step_y}")
+        return {"row1_y": centers[0], "step_y": step_y, "centers": centers}
+
     def close(self):
         try:
             self.d.close()
@@ -315,9 +449,6 @@ def cmd_menu():
         s.close()
 
 
-ROW_STEP_Y = 66  # vertical spacing between sidebar rows, measured on the reference window
-
-
 def cmd_scroll_colour():
     """Task 11: open 6 tabs, colour rows 1 (Red) and 2 (Blue) via the row
     menu, shrink the window so the 6-row list must scroll, scroll to the
@@ -334,8 +465,16 @@ def cmd_scroll_colour():
     try:
         s.open_tabs(5)  # 6 total with the initial tab
 
-        s.colour_row(ROW1, 4, "row1")  # Red
-        s.colour_row((ROW1[0], ROW1[1] + ROW_STEP_Y), 1, "row2")  # Blue
+        geom = s.measure_row_geometry()
+        if geom["step_y"] is None:
+            raise RuntimeError("cmd_scroll_colour: could not measure row spacing "
+                                "(fewer than 2 rows detected with 6 tabs open)")
+        row1_y, step_y = geom["row1_y"], geom["step_y"]
+        log(f"task11: measured row1_y={row1_y} step_y={step_y} (not the hardcoded "
+            "ROW_STEP_Y=66 an earlier version used, which was wrong -- true spacing is 54px)")
+
+        s.colour_row((ROW1[0], round(row1_y)), 4, "row1")  # Red
+        s.colour_row((ROW1[0], round(row1_y + step_y)), 1, "row2")  # Blue
 
         before_shot = os.path.join(ARTIFACT_DIR, "task11-coloured-before-scroll.png")
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
@@ -381,15 +520,18 @@ def cmd_scroll_colour():
         # be waved through because red and blue both still exist on screen
         # somewhere. Require each colour's y-center to fall within its own
         # row's band, and require it NOT to fall within the other row's band
-        # (catches a partial swap). ROW_STEP_Y is measured on the pre-resize,
-        # pre-scroll layout; after "scroll to top" the observed row spacing
-        # has drifted somewhat (measured 54px vs the nominal 66px in one
-        # captured run), so the band is wide (+/-25px) to absorb that rather
-        # than assume exact pixel reproduction across window states.
-        BAND_TOLERANCE = 25
+        # (catches a partial swap). row1_y/step_y are measured once, above,
+        # before the resize/scroll -- the per-row height itself doesn't
+        # change across window states, only how many rows fit on screen, so
+        # the same measured step is reused here. The tolerance (+/-15px,
+        # tighter than an earlier version's +/-25 now that the step itself
+        # is measured instead of guessed) absorbs the residual few-pixel
+        # rendering variance observed between the pre-scroll and
+        # post-"scroll to top" layouts, not a wrong constant.
+        BAND_TOLERANCE = 15
 
         def band(row_index):
-            center = ROW1[1] + row_index * ROW_STEP_Y
+            center = row1_y + row_index * step_y
             return (center - BAND_TOLERANCE, center + BAND_TOLERANCE)
 
         def is_reddish(px):
@@ -434,6 +576,152 @@ def cmd_scroll_colour():
         s.close()
 
 
+def _red_centre_in_sidebar(img, col_width=260):
+    """y-center of reddish pixels in the sidebar column, or None if none
+    found. Shared by cmd_drag_reorder's before/after/positive-control reads
+    -- the same is_reddish invariant cmd_scroll_colour already validated.
+    col_width defaults to 260, matching SIDEBAR_COLUMN_WIDTH defined later
+    in this file (module-level constant, not referenced directly here to
+    avoid a definition-order dependency)."""
+    def is_reddish(px):
+        r, g, b = px[:3]
+        return r > 180 and g < 160 and b < 160
+
+    sidebar = img.crop((0, 0, min(col_width, img.width), img.height))
+    pixels = sidebar.load()
+    ys = [y for y in range(sidebar.height) for x in range(sidebar.width) if is_reddish(pixels[x, y])]
+    return sum(ys) / len(ys) if ys else None
+
+
+def cmd_drag_reorder():
+    """Tab drag-to-reorder within the sidebar. Also the deciding evidence
+    for the checklist's separate "drag a tab into its own window" item
+    (`docs/acceptance.md`), since both are driven by the same DND wiring on
+    the tab widget -- confirmed absent by reading the source directly:
+    `src/apprt/gtk/class/sidebar.zig` and `sidebar_row.zig` wire no
+    `GtkDragSource`/`GtkDropTarget` at all; the only `DropTarget` anywhere
+    in the GTK apprt is `surface.zig`'s, for file drops onto the terminal,
+    unrelated to tabs.
+
+    Protocol: open 3 tabs, colour the newest (focused, rank 3) row red --
+    ONE marker, so there's no ambiguity about which row moved. Send
+    `move_tab:1` via a custom keybind this command adds to its own launch
+    config (no default keybind exists for it) -- with exactly 3 tabs this
+    wraps position 2 to position 0 (see `moveTab` in window.zig), so the
+    red dot must land at rank 1. That's the POSITIVE CONTROL: it proves
+    reordering is observable to this detector at all, before a
+    synthetic-drag negative gets to mean anything. Only then does a
+    synthetic drag (rank 1 -> rank 3, 30 `MotionNotify` steps, 1s hold
+    before `ButtonRelease`) get attempted, and the dot's position is
+    checked again -- staying at rank 1 confirms the drag had no effect,
+    consistent with the source read: there's nothing to drag, this is a
+    measured absence of the feature, not this harness being blind to it."""
+    ctrl_kc_sym, shift_kc_sym, m_kc_sym = 0xFFE3, 0xFFE1, 0x006D  # Control_L, Shift_L, m
+    s = Session(extra_config="keybind = ctrl+shift+m=move_tab:1\n")
+    try:
+        s.open_tabs(2)  # 3 total; the newest (index 2, rank 3) is focused
+        geom = s.measure_row_geometry()
+        if geom["step_y"] is None or len(geom["centers"]) < 3:
+            raise RuntimeError(f"cmd_drag_reorder: expected 3 rows, measured {geom['centers']}")
+        rank1_y, rank2_y, rank3_y = (round(c) for c in geom["centers"][:3])
+        log(f"drag-reorder: measured ranks 1/2/3 at y={rank1_y}/{rank2_y}/{rank3_y}")
+
+        s.colour_row((ROW1[0], rank3_y), 4, "drag-reorder-rank3")  # Red
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        coloured_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        os.makedirs(ARTIFACT_DIR, exist_ok=True)
+        coloured_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-1-coloured-rank3.png"))
+        coloured_centre = _red_centre_in_sidebar(coloured_img)
+        log(f"drag-reorder: red centre after colouring={coloured_centre} (expect near rank3_y={rank3_y})")
+
+        s.focus_terminal()  # the colour popover closing doesn't hand keyboard focus back on its own
+
+        ctrl_kc = s.d.keysym_to_keycode(ctrl_kc_sym)
+        shift_kc = s.d.keysym_to_keycode(shift_kc_sym)
+        m_kc = s.d.keysym_to_keycode(m_kc_sym)
+        xtest.fake_input(s.d, X.KeyPress, ctrl_kc)
+        xtest.fake_input(s.d, X.KeyPress, shift_kc)
+        xtest.fake_input(s.d, X.KeyPress, m_kc)
+        s.d.sync()
+        time.sleep(0.15)
+        xtest.fake_input(s.d, X.KeyRelease, m_kc)
+        xtest.fake_input(s.d, X.KeyRelease, shift_kc)
+        xtest.fake_input(s.d, X.KeyRelease, ctrl_kc)
+        s.d.sync()
+        time.sleep(1.0)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after_movetab_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after_movetab_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-2-after-movetab.png"))
+        after_movetab_centre = _red_centre_in_sidebar(after_movetab_img)
+        log(f"drag-reorder: red centre after move_tab:1={after_movetab_centre} (expect near rank1_y={rank1_y})")
+
+        BAND_TOLERANCE = 15
+        control_ok = (
+            after_movetab_centre is not None
+            and abs(after_movetab_centre - rank1_y) <= BAND_TOLERANCE
+        )
+        if not control_ok:
+            log("POSITIVE CONTROL FAILED — move_tab:1 did not move the coloured row to rank 1; "
+                "refusing to trust a synthetic-drag negative without proof reordering is observable")
+            return 2
+        log("positive control OK: move_tab:1 moved the coloured row from rank 3 to rank 1 -- "
+            "reordering is observable to this detector")
+
+        # Synthetic drag: rank 1 -> rank 3, matching the reference recipe
+        # (30 steps, 1s hold) used to independently validate this finding.
+        x0, y0 = ROW1[0], rank1_y
+        x1, y1 = ROW1[0], rank3_y
+        xtest.fake_input(s.d, X.MotionNotify, x=s.ax + x0, y=s.ay + y0)
+        s.d.sync()
+        time.sleep(0.3)
+        xtest.fake_input(s.d, X.ButtonPress, 1)
+        s.d.sync()
+        time.sleep(0.1)
+        steps = 30
+        for i in range(1, steps + 1):
+            fx = x0 + (x1 - x0) * i / steps
+            fy = y0 + (y1 - y0) * i / steps
+            xtest.fake_input(s.d, X.MotionNotify, x=s.ax + round(fx), y=s.ay + round(fy))
+            s.d.sync()
+            time.sleep(0.03)
+        time.sleep(1.0)  # hold before release
+        xtest.fake_input(s.d, X.ButtonRelease, 1)
+        s.d.sync()
+        time.sleep(1.0)
+
+        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+        after_drag_img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+        after_drag_img.save(os.path.join(ARTIFACT_DIR, "drag-reorder-3-after-drag.png"))
+        after_drag_centre = _red_centre_in_sidebar(after_drag_img)
+        log(f"drag-reorder: red centre after synthetic drag={after_drag_centre} "
+            f"(rank1_y={rank1_y}, rank3_y={rank3_y})")
+
+        stayed_at_rank1 = (
+            after_drag_centre is not None and abs(after_drag_centre - rank1_y) <= BAND_TOLERANCE
+        )
+        moved_to_rank3 = (
+            after_drag_centre is not None and abs(after_drag_centre - rank3_y) <= BAND_TOLERANCE
+        )
+
+        if stayed_at_rank1 and not moved_to_rank3:
+            log("drag-reorder: NOT IMPLEMENTED (measured) — synthetic drag had no effect after "
+                "a same-run positive control confirmed reordering is observable; matches the "
+                "source read (no GtkDragSource/GtkDropTarget wired in sidebar.zig/sidebar_row.zig)")
+            return 0
+        elif moved_to_rank3:
+            log("drag-reorder: REORDERING HAPPENED — the drag moved the row to rank 3. "
+                "Contradicts the source read; needs a human to confirm before trusting this.")
+            return 1
+        else:
+            log(f"drag-reorder: INCONCLUSIVE — red centre after drag ({after_drag_centre}) is "
+                f"neither rank 1 nor rank 3; something moved it somewhere unexpected")
+            return 2
+    finally:
+        s.close()
+
+
 # Terminal background is a distinct blue-gray (measured ~(40,44,52) across
 # this whole sweep's screenshots); GTK chrome (headerbar, tab bar, sidebar
 # row cards) is a near-neutral gray (~(69,69,69)). The invariant that holds
@@ -444,75 +732,131 @@ def _looks_like_chrome(px):
     return (b - r) < 8
 
 
-def _prompt_text_x(img, y, thresh=150):
-    """First bright (near-white) pixel in row y -- the shell prompt's text
-    start. Used as the sidebar-column-occupancy signal: with a sidebar, the
-    terminal (and its prompt) starts well to the right of the column; with
-    none, the terminal spans the full width and the prompt starts near the
-    left edge."""
-    px = img.load()
-    for x in range(img.width):
-        r, g, b = px[x, y][:3]
-        if r > thresh and g > thresh and b > thresh:
-            return x
-    return None
+# Both signals below were redesigned after independent review ran this
+# harness against a Debug build (PR #12's binary) and found the previous
+# prompt-row-scan approach locked onto the DEBUG BANNER ("Vous utilisez une
+# version de debogage...") instead of the real shell prompt: the banner is
+# bright text too, and it sits directly below the tab bar, so a "first row
+# with enough bright pixels from y=100" scan found the tab bar's own label
+# text, not the prompt underneath the banner underneath that. A fixed
+# y-band for the same reason misread which chrome row it was sampling. Both
+# replacements below are chosen to be insensitive to how many chrome rows
+# (headerbar, tab bar, debug banner, any future addition) stack above the
+# terminal, rather than assuming a fixed offset.
 
 
-def _find_prompt_row(img, y0=100, y1=250, x_scan=(0, 900), thresh=150, min_count=5):
-    """Scan downward for the first row with substantial bright-pixel content
-    -- used to locate the shell prompt's y so _prompt_text_x can be measured
-    at a real text row rather than a guessed offset (fragile across window
-    states, as Task 11's post-scroll drift showed)."""
+def _sidebar_column_signal(img, x0=0, x1=220, y0=300, y1=500):
+    """Sample a region well below any plausible stack of header/tab-bar/
+    banner chrome (a 722-tall window has plenty of room by y=300) in the
+    column a sidebar would occupy. Returns (dominant_colour, chrome_like):
+    chrome_like=True means that column is sidebar chrome (row cards etc, a
+    near-neutral grey); chrome_like=False means it's plain terminal
+    background (the terminal spans that column, so no sidebar there) --
+    this is the SAME distinguishing invariant the tab-bar-band check always
+    used (_looks_like_chrome), just aimed at a location immune to how much
+    chrome sits above it, which the terminal's first-text-row was not."""
     px = img.load()
+    x1 = min(x1, img.width)
+    y1 = min(y1, img.height)
+    colour_counts = {}
     for y in range(y0, y1):
-        n = 0
-        for x in range(*x_scan):
-            r, g, b = px[x, y][:3]
-            if r > thresh and g > thresh and b > thresh:
-                n += 1
-                if n >= min_count:
-                    return y
+        for x in range(x0, x1):
+            c = px[x, y][:3]
+            colour_counts[c] = colour_counts.get(c, 0) + 1
+    dominant = max(colour_counts, key=colour_counts.get)
+    return dominant, _looks_like_chrome(dominant)
+
+
+def _terminal_start_y(img, x0=460, x1=900, y0=68, y1=400, run=30):
+    """First y (in the terminal-side column, clear of any sidebar) where the
+    per-row dominant colour is terminal-background-blue and STAYS that way
+    for the next `run` rows -- i.e. where chrome ends and the terminal
+    actually starts, no matter how many chrome rows (tab bar, debug banner,
+    both) are stacked above it. `run` rules out a single row that happens to
+    read blue-ish inside a block of chrome (e.g. an icon or a hairline)."""
+    px = img.load()
+    x1 = min(x1, img.width)
+    y1 = min(y1, img.height)
+
+    def row_is_terminal_blue(y):
+        colour_counts = {}
+        for x in range(x0, x1):
+            c = px[x, y][:3]
+            colour_counts[c] = colour_counts.get(c, 0) + 1
+        dominant = max(colour_counts, key=colour_counts.get)
+        return not _looks_like_chrome(dominant)
+
+    y = y0
+    while y < y1:
+        if row_is_terminal_blue(y):
+            run_end = min(y + run, y1)
+            if all(row_is_terminal_blue(yy) for yy in range(y, run_end)):
+                return y
+        y += 1
     return None
 
 
-def _measure_mode(sidebar_mode, label):
-    """Launch one mode with 2 tabs, screenshot, and return the two structural
-    signals: prompt_x (sidebar-column occupancy) and chrome_band (whether a
-    horizontal tab-bar-style chrome row sits between the headerbar and the
-    terminal)."""
+def _snapshot_signals(s):
+    """One screenshot -> (img, dominant_sidebar_colour, sidebar_chrome_like,
+    terminal_start_y)."""
+    raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
+    img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+    dominant, chrome_like = _sidebar_column_signal(img)
+    start_y = _terminal_start_y(img)
+    return img, dominant, chrome_like, start_y
+
+
+def _measure_mode(sidebar_mode, label, max_polls=10, poll_interval=0.5):
+    """Launch one mode with 2 tabs and return the two structural signals:
+    sidebar_chrome_like (sidebar-column occupancy) and terminal_start_y
+    (how far down the terminal's own content starts, used differentially
+    between two same-run measurements to isolate a tab bar's height from
+    any other chrome that's present in both, like a debug banner -- see
+    cmd_none_parity()).
+
+    Polls (screenshot, remeasure) until two consecutive readings agree,
+    instead of a single screenshot after a fixed sleep -- a fixed sleep was
+    observed to read a not-yet-painted frame once (positive control on
+    `left` mode returned a sidebar-absent-looking reading once, when a
+    stray ghostty process from a prior run had shifted this run's window
+    off its expected placement and delayed its first paint). The positive
+    control caught that flake and refused to trust the run, which is what
+    it's for, but re-measuring until the signal stops changing removes the
+    flake at the source rather than only detecting it after the fact."""
     s = Session(sidebar_mode=sidebar_mode)
     try:
         s.open_tabs(1)  # 2 tabs total
         time.sleep(0.5)
-        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
-        img = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
+
+        prev = None
+        img = dominant = chrome_like = start_y = None
+        settled = False
+        for attempt in range(1, max_polls + 1):
+            img, dominant, chrome_like, start_y = _snapshot_signals(s)
+            cur = (chrome_like, start_y)
+            if cur == prev:
+                settled = True
+                break
+            prev = cur
+            time.sleep(poll_interval)
+
+        if not settled:
+            log(f"{label}: WARNING — signal did not settle across {max_polls} polls "
+                f"({max_polls * poll_interval:.1f}s); using the last reading anyway")
+
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
         shot_path = os.path.join(ARTIFACT_DIR, f"none-parity-{label}.png")
         img.save(shot_path)
 
-        prompt_y = _find_prompt_row(img)
-        prompt_x = _prompt_text_x(img, prompt_y) if prompt_y is not None else None
-
-        # Sample the row-bar band (y=100-140, the AdwTabBar's expected
-        # position measured on the reference window) on the terminal side
-        # (x=460-900, clear of any sidebar column regardless of mode) and
-        # check whether the dominant colour there is chrome-grey (tab bar
-        # present) or terminal-background-blue (no tab bar, content already
-        # started).
-        px = img.load()
-        colour_counts = {}
-        for y in range(100, 140):
-            for x in range(460, min(900, s.ww)):
-                c = px[x, y][:3]
-                colour_counts[c] = colour_counts.get(c, 0) + 1
-        dominant = max(colour_counts, key=colour_counts.get)
-        chrome_band = _looks_like_chrome(dominant)
-
-        log(f"{label}: prompt_row_y={prompt_y} prompt_text_x={prompt_x} "
-            f"tab-bar-band dominant colour={dominant} chrome_like={chrome_band} -> {shot_path}")
-        return {"prompt_x": prompt_x, "chrome_band": chrome_band, "shot": shot_path}
+        log(f"{label}: settled after {attempt} poll(s), sidebar-column dominant "
+            f"colour={dominant} chrome_like={chrome_like} terminal_start_y={start_y} -> {shot_path}")
+        return {"chrome_like": chrome_like, "terminal_start_y": start_y, "shot": shot_path,
+                "settled": settled, "window_width": s.ww}
     finally:
         s.close()
+
+
+TAB_BAR_HEIGHT_THRESHOLD = 20  # px; a real AdwTabBar row measures ~40px, see cmd_none_parity
 
 
 def cmd_none_parity():
@@ -525,72 +869,62 @@ def cmd_none_parity():
     that script structurally cannot.
 
     Positive control: measures `left` mode with the same method in the same
-    run first, to prove the two structural signals below actually
-    discriminate a sidebar-present state from a sidebar-absent one, rather
-    than just returning "absent" unconditionally."""
+    run first, to prove the structural signals below actually discriminate
+    a sidebar-present state from a sidebar-absent one, rather than just
+    returning "absent" unconditionally. `left`'s terminal_start_y also
+    serves as the tab-bar-height baseline (see below) -- both measurements
+    run against the SAME binary in the SAME invocation, so any chrome that
+    isn't the tab bar (e.g. a Debug build's banner) contributes equally to
+    both and cancels out in the comparison, whatever its own height is."""
     log("positive control: measuring `left` mode (sidebar expected present, no tab bar)")
     left = _measure_mode("left", "left-control")
-    if left["prompt_x"] is None:
-        log("POSITIVE CONTROL FAILED — could not even locate `left` mode's terminal prompt")
+    if not left["settled"]:
+        log("POSITIVE CONTROL FAILED — signal never settled across the poll cap; "
+            "refusing to trust an unsettled reading even if it looked plausible")
         return 2
-    if not (left["prompt_x"] > 150 and not left["chrome_band"]):
-        log(f"POSITIVE CONTROL FAILED — `left` mode did not show the expected sidebar signal "
-            f"(prompt_x={left['prompt_x']}, chrome_band={left['chrome_band']}); "
-            "refusing to trust the `none` measurement below")
+    if left["terminal_start_y"] is None:
+        log("POSITIVE CONTROL FAILED — could not locate `left` mode's terminal content start")
         return 2
-    log(f"positive control OK: left mode prompt_x={left['prompt_x']} (sidebar occupies the column), "
-        f"chrome_band={left['chrome_band']} (no tab bar)")
+    if not left["chrome_like"]:
+        log(f"POSITIVE CONTROL FAILED — `left` mode's sidebar column did not read as sidebar "
+            f"chrome; refusing to trust the `none` measurement below")
+        return 2
+    log(f"positive control OK: left mode sidebar column reads as chrome (sidebar present), "
+        f"terminal_start_y={left['terminal_start_y']} (tab-bar-height baseline)")
 
     log("measuring `none` mode")
     none = _measure_mode("none", "none-mode")
+    if not none["settled"]:
+        log("MEASUREMENT FAILED — `none` mode's signal never settled across the poll cap; "
+            "refusing to report a verdict from an unsettled reading")
+        return 2
+    if none["terminal_start_y"] is None:
+        log("MEASUREMENT FAILED — could not locate `none` mode's terminal content start")
+        return 2
 
-    no_sidebar = none["prompt_x"] is not None and none["prompt_x"] < 150
-    tab_bar_present = none["chrome_band"] is True
-    log(f"none: no_sidebar={no_sidebar} (prompt_x={none['prompt_x']}) "
-        f"tab_bar_present={tab_bar_present} (chrome_band={none['chrome_band']})")
+    no_sidebar = not none["chrome_like"]
+    tab_bar_height = none["terminal_start_y"] - left["terminal_start_y"]
+    tab_bar_present = tab_bar_height > TAB_BAR_HEIGHT_THRESHOLD
+    log(f"none: no_sidebar={no_sidebar} (sidebar column chrome_like={none['chrome_like']}) "
+        f"tab_bar_present={tab_bar_present} (terminal_start_y none={none['terminal_start_y']} "
+        f"left={left['terminal_start_y']}, height={tab_bar_height})")
 
     # "no sidebar shortcut": Ctrl+Shift+B should be a no-op in none mode.
-    s = Session(sidebar_mode="none")
-    try:
-        s.open_tabs(1)
-        time.sleep(0.5)
-        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
-        before = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
-        before.save(os.path.join(ARTIFACT_DIR, "none-parity-shortcut-before.png"))
-
-        ctrl_kc = s.d.keysym_to_keycode(0xFFE3)
-        shift_kc = s.d.keysym_to_keycode(0xFFE1)
-        b_kc = s.d.keysym_to_keycode(0x0062)  # b
-        xtest.fake_input(s.d, X.KeyPress, ctrl_kc)
-        xtest.fake_input(s.d, X.KeyPress, shift_kc)
-        xtest.fake_input(s.d, X.KeyPress, b_kc)
-        s.d.sync()
-        time.sleep(0.15)
-        xtest.fake_input(s.d, X.KeyRelease, b_kc)
-        xtest.fake_input(s.d, X.KeyRelease, shift_kc)
-        xtest.fake_input(s.d, X.KeyRelease, ctrl_kc)
-        s.d.sync()
-        time.sleep(1.0)
-
-        raw = s.win.get_image(0, 0, s.ww, s.wh, X.ZPixmap, 0xFFFFFFFF)
-        after = Image.frombytes("RGB", (s.ww, s.wh), raw.data, "raw", "BGRX")
-        after.save(os.path.join(ARTIFACT_DIR, "none-parity-shortcut-after.png"))
-    finally:
-        s.close()
-
-    before_px, after_px = before.load(), after.load()
-    diff_pixels = sum(
-        1 for y in range(before.height) for x in range(before.width)
-        if before_px[x, y] != after_px[x, y]
-    )
-    total_pixels = before.width * before.height
-    diff_ratio = diff_pixels / total_pixels
-    no_shortcut = diff_ratio < 0.005  # cursor blink / AA jitter tolerance
-    log(f"none: Ctrl+Shift+B diff_ratio={diff_ratio:.5f} ({diff_pixels}/{total_pixels} px) "
+    # Uses the SAME sidebar-column-restricted detector as --none-shortcut
+    # (_shortcut_column_diff), not an independent whole-window diff -- an
+    # earlier version measured the whole window here and disagreed with
+    # --none-shortcut's verdict on the same binary (whole-window diff picks
+    # up unrelated terminal-side effects, like an unbound key's escape
+    # sequence echoing to the shell, and mislabels that as "the sidebar
+    # toggled"). One detector, so the two commands can't contradict each
+    # other on the same measurement.
+    none_shortcut_ratio = _shortcut_column_diff("none", "none-parity-shortcut")
+    no_shortcut = none_shortcut_ratio < 0.005  # cursor blink / AA jitter tolerance
+    log(f"none: sidebar-column(x<{SIDEBAR_COLUMN_WIDTH}) shortcut diff_ratio={none_shortcut_ratio:.5f} "
         f"no_shortcut_effect={no_shortcut}")
 
     if no_sidebar and tab_bar_present and no_shortcut:
-        log("none-parity: PASS — tab bar present, no sidebar column, Ctrl+Shift+B is a no-op")
+        log("none-parity: PASS — tab bar present, no sidebar column, Ctrl+Shift+B doesn't touch it")
         return 0
     else:
         log(f"none-parity: FAIL — no_sidebar={no_sidebar} tab_bar_present={tab_bar_present} "
@@ -659,6 +993,189 @@ def _shortcut_column_diff(sidebar_mode, label):
     return ratio
 
 
+UPSTREAM_BIN = "/usr/bin/ghostty"
+
+
+def _row_text_end_x(img, y, x0=0, x1=None, thresh=150):
+    """Rightmost bright (near-white) pixel in row y -- used to detect NEW
+    text appended to an existing line, such as a leaked escape sequence
+    echoed onto the shell prompt's own line after a keypress."""
+    x1 = x1 or img.width
+    px = img.load()
+    end = None
+    for x in range(x0, x1):
+        r, g, b = px[x, y][:3]
+        if r > thresh and g > thresh and b > thresh:
+            end = x
+    return end
+
+
+def _last_text_row_group_end_x(img, y0=60, y1=400, x0=0, x1=None, thresh=150, min_count=5, gap_tol=3):
+    """Find the LAST contiguous group of text-bearing rows in [y0, y1) and
+    return the max text-end-x within it -- this is guaranteed to be the
+    shell prompt's own line, not any chrome row above it (headerbar, tab
+    bar, a Debug build's banner), because nothing in this harness's test
+    windows ever renders below the prompt in an otherwise-empty terminal.
+    A fixed-height window anchored to `terminal_start_y` was tried first and
+    landed on the banner instead of the prompt when the banner's own row
+    happened to fall inside that window and end further right than the
+    (unchanged) prompt line -- confirmed directly: it read the banner's
+    constant width in both the before and after screenshot and reported no
+    change, while the prompt line one group below it had, in fact, grown."""
+    x1 = x1 or img.width
+    y1 = min(y1, img.height)
+    px = img.load()
+    row_has_text = []
+    for y in range(y0, y1):
+        n = 0
+        for x in range(x0, x1):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                n += 1
+                if n >= min_count:
+                    row_has_text.append(True)
+                    break
+        else:
+            row_has_text.append(False)
+
+    groups = []
+    gap = gap_tol + 1
+    for i, has in enumerate(row_has_text):
+        if has:
+            if gap > gap_tol:
+                groups.append([y0 + i, y0 + i])
+            else:
+                groups[-1][1] = y0 + i
+            gap = 0
+        else:
+            gap += 1
+
+    if not groups:
+        return None
+    last_y0, last_y1 = groups[-1]
+    best = None
+    for y in range(last_y0, last_y1 + 1):
+        end = _row_text_end_x(img, y, x0, x1, thresh)
+        if end is not None and (best is None or end > best):
+            best = end
+    return best
+
+
+def _ctrl_shift_b_terminal_leak(win, d, ax, ay, ww, wh, label):
+    """Screenshot, press Ctrl+Shift+B, screenshot again, and measure the
+    CAUSAL content change on the prompt's own line (text-end-x growing) --
+    not a whole-window pixel diff, which conflates unrelated differences
+    between two different windows/binaries (title, banner, font metrics)
+    with the one thing that's actually comparable: did new text get echoed
+    onto the terminal for this keypress. Returns
+    (leaked: bool, before_end, after_end, shot paths)."""
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+    raw = win.get_image(0, 0, ww, wh, X.ZPixmap, 0xFFFFFFFF)
+    before = Image.frombytes("RGB", (ww, wh), raw.data, "raw", "BGRX")
+    before_path = os.path.join(ARTIFACT_DIR, f"{label}-before.png")
+    before.save(before_path)
+
+    ctrl_kc = d.keysym_to_keycode(0xFFE3)
+    shift_kc = d.keysym_to_keycode(0xFFE1)
+    b_kc = d.keysym_to_keycode(0x0062)
+    xtest.fake_input(d, X.KeyPress, ctrl_kc)
+    xtest.fake_input(d, X.KeyPress, shift_kc)
+    xtest.fake_input(d, X.KeyPress, b_kc)
+    d.sync()
+    time.sleep(0.15)
+    xtest.fake_input(d, X.KeyRelease, b_kc)
+    xtest.fake_input(d, X.KeyRelease, shift_kc)
+    xtest.fake_input(d, X.KeyRelease, ctrl_kc)
+    d.sync()
+    time.sleep(1.0)
+
+    raw = win.get_image(0, 0, ww, wh, X.ZPixmap, 0xFFFFFFFF)
+    after = Image.frombytes("RGB", (ww, wh), raw.data, "raw", "BGRX")
+    after_path = os.path.join(ARTIFACT_DIR, f"{label}-after.png")
+    after.save(after_path)
+
+    before_end = _last_text_row_group_end_x(before)
+    after_end = _last_text_row_group_end_x(after)
+    grew = (before_end is None and after_end is not None) or (
+        before_end is not None and after_end is not None and after_end - before_end > 10
+    )
+    log(f"{label}: prompt-line text end before={before_end} after={after_end} "
+        f"terminal_leak={grew} -> {before_path}, {after_path}")
+    return grew, before_end, after_end
+
+
+def _measure_upstream_ctrl_shift_b():
+    """Launch upstream Ghostty (no sidebar patch, no gtk-sidebar-tabs option,
+    and independently confirmed via `ghostty +list-keybinds --default` to
+    have no Ctrl+Shift+B binding at all -- same as the fork, which also adds
+    no keybind for the sidebar toggle; it's a GTK accelerator, invisible to
+    the keybind system) and measure whether Ctrl+Shift+B leaks new text onto
+    the terminal's prompt line -- the real remaining parity question for
+    `none` mode's "no sidebar shortcut" claim once the sidebar-column check
+    clears it. If upstream leaks the same way, the fork's leak in `none`
+    mode is what any unbound key does anywhere, not a fork-specific
+    difference. Returns None (and logs why) if upstream isn't available."""
+    if not os.path.exists(UPSTREAM_BIN):
+        log(f"upstream comparison skipped -- {UPSTREAM_BIN} not found")
+        return None
+
+    env = dict(os.environ)
+    env["GDK_BACKEND"] = "x11"
+    env["DISPLAY"] = env.get("DISPLAY", ":0")
+    env.pop("WAYLAND_DISPLAY", None)
+    env["XDG_CONFIG_HOME"] = tempfile.mkdtemp(prefix="acceptance-harness-upstream-xdg-")
+    proc = subprocess.Popen([UPSTREAM_BIN], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    d = None
+    try:
+        time.sleep(6.0)
+        d = display.Display(os.environ.get("DISPLAY", ":0"))
+        root = d.screen().root
+        found = find_ghostty_window(d, root)
+        if not found:
+            log("upstream comparison FAILED -- window not found within timeout")
+            return None
+        wid, ww, wh = found
+        win = d.create_resource_object("window", wid)
+        tr = root.translate_coords(win, 0, 0)
+        ax, ay = tr.x, tr.y
+
+        xtest.fake_input(d, X.MotionNotify, x=ax + 600, y=ay + 300)
+        d.sync()
+        time.sleep(0.3)
+        xtest.fake_input(d, X.ButtonPress, 1)
+        d.sync()
+        time.sleep(0.1)
+        xtest.fake_input(d, X.ButtonRelease, 1)
+        d.sync()
+        time.sleep(0.8)
+
+        return _ctrl_shift_b_terminal_leak(win, d, ax, ay, ww, wh, "upstream-ctrl-shift-b")
+    finally:
+        if d is not None:
+            d.close()
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _measure_fork_ctrl_shift_b_leak(sidebar_mode, label):
+    """Same content-based (prompt-line text growth) measurement as
+    _measure_upstream_ctrl_shift_b, but against the fork binary under test
+    via the normal Session -- used to compare like-for-like with upstream
+    instead of a whole-window pixel diff, which would pick up differences
+    between the two binaries/windows (title, a Debug build's banner, font
+    metrics) that have nothing to do with whether the keypress leaked."""
+    s = Session(sidebar_mode=sidebar_mode)
+    try:
+        s.open_tabs(1)
+        time.sleep(0.5)
+        return _ctrl_shift_b_terminal_leak(s.win, s.d, s.ax, s.ay, s.ww, s.wh, label)
+    finally:
+        s.close()
+
+
 def cmd_none_shortcut():
     """Ctrl+Shift+B must be a no-op in `gtk-sidebar-tabs=none`: no image
     change at all, measured on the sidebar's own column (x<260), not the
@@ -669,7 +1186,21 @@ def cmd_none_shortcut():
     Positive control, same run: `left` mode must show a LARGE column diff for
     the identical gesture, or the run refuses to conclude anything about
     `none` -- a no-op measurement that can't detect a real toggle either
-    proves nothing."""
+    proves nothing. This is a stricter, dedicated companion to the
+    shortcut check inside cmd_none_parity(), which reuses this same
+    column-restricted detector (a prior version used an independent
+    whole-window diff there and could disagree with this command on the
+    same binary -- see _shortcut_column_diff's docstring for why
+    whole-window doesn't discriminate).
+
+    Also measures, informationally, whether upstream Ghostty shows a
+    comparable effect for the identical gesture -- the real remaining
+    parity question once "does the sidebar column change" is answered: an
+    unbound Ctrl+Shift+B may still leak an escape sequence to the terminal
+    (harmless, and not what this command's PASS/FAIL is about), and if
+    upstream does the same thing for the same unbound key, that leak isn't
+    a fork-specific difference. Does not affect this command's own verdict,
+    which is specifically about the sidebar column, not the terminal."""
     log("positive control: `left` mode, Ctrl+Shift+B must change the sidebar column")
     CHANGE_THRESHOLD = 0.05  # a sidebar appearing/disappearing swamps this in a 260px-wide column
     NOOP_THRESHOLD = 0.005  # cursor blink / AA jitter tolerance
@@ -686,8 +1217,40 @@ def cmd_none_shortcut():
     no_effect = none_ratio < NOOP_THRESHOLD
     log(f"none: sidebar-column diff_ratio={none_ratio:.5f} no_effect={no_effect}")
 
+    # Content-based (not whole-window-pixel-based) side-by-side comparison:
+    # does upstream leak the same unbound key onto its terminal's prompt
+    # line the way `none` mode does? Informational only -- does not affect
+    # this command's own PASS/FAIL, which is about the sidebar column.
+    #
+    # Only meaningful when no_effect is True: if the sidebar itself just
+    # toggled (no_effect=False), the terminal's column width changed along
+    # with it, which reflows the prompt's own wrapped text to a different
+    # end position -- a "prompt-line text end moved" reading in that case is
+    # the reflow, not a leaked escape sequence, and comparing it against
+    # upstream would be comparing two unrelated things. Confirmed directly:
+    # on the unfixed binary this measured "690->850" (a real 160px shift)
+    # with NO new text visible in the saved screenshot at all -- purely the
+    # terminal rewrapping into the space the sidebar stopped occupying.
     if no_effect:
-        log("none-shortcut: PASS — Ctrl+Shift+B is a no-op in none mode "
+        fork_leaked, fork_before, fork_after = _measure_fork_ctrl_shift_b_leak(
+            "none", "none-shortcut-fork-leak")
+        upstream_result = _measure_upstream_ctrl_shift_b()
+        if upstream_result is not None:
+            upstream_leaked, upstream_before, upstream_after = upstream_result
+            log(f"comparison (informational, not this command's verdict): "
+                f"fork none-mode terminal_leak={fork_leaked} ({fork_before}->{fork_after}), "
+                f"upstream terminal_leak={upstream_leaked} ({upstream_before}->{upstream_after}) "
+                f"-- {'MATCH' if fork_leaked == upstream_leaked else 'DIVERGE'}")
+        else:
+            log(f"comparison (informational): fork none-mode terminal_leak={fork_leaked} "
+                f"({fork_before}->{fork_after}); upstream unavailable to compare against")
+    else:
+        log("comparison skipped — the sidebar column itself changed, so any prompt-line text "
+            "movement is confounded by the terminal reflowing into/out of the freed column "
+            "width, not a leaked escape sequence; not comparable to upstream in this state")
+
+    if no_effect:
+        log("none-shortcut: PASS — Ctrl+Shift+B does not touch the sidebar column in none mode "
             "(positive control confirmed the same gesture changes the column in left mode)")
         return 0
     else:
@@ -706,6 +1269,8 @@ def main():
     ap.add_argument("--none-shortcut", action="store_true",
                      help="none mode: Ctrl+Shift+B must be a no-op on the sidebar column, "
                           "with a left-mode positive control in the same run")
+    ap.add_argument("--drag-reorder", action="store_true",
+                     help="tab drag-to-reorder in the sidebar, with a move_tab:1 positive control")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -718,6 +1283,8 @@ def main():
         return cmd_none_parity()
     if args.none_shortcut:
         return cmd_none_shortcut()
+    if args.drag_reorder:
+        return cmd_drag_reorder()
 
     ap.print_help()
     return 1
