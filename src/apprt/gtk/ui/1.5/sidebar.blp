@@ -11,6 +11,17 @@ template $GhosttySidebar: Adw.Bin {
       single-click-activate: true;
       activate => $row_activated();
 
+      // The sidebar's keyboard grammar. Capture phase so Enter/Space/Escape
+      // are read before GtkListView's own bindings: Enter/Space must mean
+      // "activate this tab" (and hand focus back to the terminal), Escape must
+      // return focus to the terminal. Up/Down are deliberately NOT handled
+      // here — they fall through to the list's native cursor movement, which
+      // for a single selection moves the highlight.
+      EventControllerKey {
+        propagation-phase: capture;
+        key-pressed => $view_key_pressed();
+      }
+
       // autoselect must be off. It defaults on, and on an EMPTY model it
       // forces a selection of item 0 — which reaches through AdwTabPages into
       // adw_tab_view_get_nth_page(0) on a tab view with no pages yet, and
