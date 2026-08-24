@@ -389,6 +389,7 @@ pub const Window = extern struct {
             .init("prompt-context-tab-title", actionPromptContextTabTitle, null),
             .init("close-tab-at", actionCloseTabAt, u_variant_type),
             .init("toggle-sidebar", actionToggleSidebar, null),
+            .init("focus-sidebar", actionFocusSidebar, null),
             .init("ring-bell", actionRingBell, null),
             .init("split-right", actionSplitRight, null),
             .init("split-left", actionSplitLeft, null),
@@ -1925,6 +1926,22 @@ pub const Window = extern struct {
 
         const showing = priv.split_view.getShowSidebar() != 0;
         priv.split_view.setShowSidebar(@intFromBool(!showing));
+    }
+
+    /// Move keyboard focus into the sidebar's tab list. Inert unless the
+    /// sidebar is actually on screen: focusing a hidden list would strand the
+    /// keyboard on an off-screen widget, and it keeps this gesture invisible
+    /// in `gtk-sidebar-tabs = none` and whenever the sidebar is collapsed —
+    /// the same "the sidebar path does nothing when there's no sidebar"
+    /// promise the toggle's own notifyShowSidebar guard exists to keep.
+    fn actionFocusSidebar(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        if (priv.split_view.getShowSidebar() == 0) return;
+        priv.sidebar.focusList();
     }
 
     /// Hiding the sidebar must never strand the keyboard on a widget that

@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const adw = @import("adw");
+const gdk = @import("gdk");
 const gio = @import("gio");
 const glib = @import("glib");
 const gobject = @import("gobject");
@@ -508,8 +509,27 @@ pub const Sidebar = extern struct {
     /// `tab_view`'s `pos`-th page — those two orders agree only by
     /// accident once rows are grouped. See `setTabView`.
     fn rowActivated(_: *gtk.ListView, pos: c_uint, self: *Self) callconv(.c) void {
+        self.activatePosition(pos);
+    }
+
+    /// Switch to the tab at `pos` and hand keyboard focus to its terminal.
+    /// Shared by the mouse row-activate path and the keyboard Enter/Space
+    /// handler so a click and a keypress land in exactly the same place.
+    fn activatePosition(self: *Self, pos: c_uint) void {
         const priv = self.private();
         const tab_view = priv.tab_view orelse return;
+        // Keyboard entry can arrive with nothing selected, and `focusList`
+        // reasons about that value explicitly -- so reject it here rather
+        // than leaning on `getItem` happening to return null for it.
+        if (pos == gtk.INVALID_LIST_POSITION) return;
+        // NOTE: this branch used to also bound `pos` against
+        // `tab_view.getNPages()`. That guard was written before rows were
+        // grouped by repository, when the two orders happened to coincide.
+        // `pos` indexes `priv.model` in GROUPED order; the page count is
+        // `tab_view`'s. Comparing them is the very confusion `rowActivated`'s
+        // own comment warns about -- "those two orders agree only by accident
+        // once rows are grouped". The real bound is the model itself, and
+        // `getItem` already enforces it by returning null.
 
         const raw = priv.model.as(gio.ListModel).getItem(pos) orelse return;
         const item: *gobject.Object = @ptrCast(@alignCast(raw));
@@ -518,6 +538,68 @@ pub const Sidebar = extern struct {
 
         tab_view.setSelectedPage(page);
 
+        const tab = gobject.ext.cast(Tab, page.getChild()) orelse return;
+        if (tab.getActiveSurface()) |surface| surface.grabFocus();
+    }
+
+    /// Give the tab list keyboard focus. This is the sidebar's real keyboard
+    /// entrance: the terminal Surface consumes Tab before it can reach the GTK
+    /// focus chain (an established fact this fork does not fight), so a
+    /// dedicated accelerator — `win.focus-sidebar` — routes here instead. The
+    /// cursor is parked on the row that mirrors the live tab, so Up/Down move
+    /// relative to where the user actually is rather than from the list's top.
+    pub fn focusList(self: *Self) void {
+        const priv = self.private();
+
+        // syncSelection is what keeps "selected row" == "active tab"; the
+        // keyboard cursor should start on that same row.
+        self.syncSelection();
+
+        const pos = priv.model.getSelected();
+        if (pos != gtk.INVALID_LIST_POSITION) {
+            priv.view.scrollTo(pos, .{ .focus = true, .select = true }, null);
+        }
+        _ = priv.view.as(gtk.Widget).grabFocus();
+    }
+
+    /// The keyboard grammar once the list has focus. Up/Down are left to
+    /// GtkListView's own cursor movement — for a single selection that moves
+    /// the highlight, which is exactly what's wanted. This handles only the
+    /// three keys GtkListView would not route the way the sidebar needs.
+    ///
+    /// Capture phase (see sidebar.blp), so Enter and Space win before the
+    /// list's own bindings and mean "activate this tab", not the default
+    /// select/scroll.
+    fn viewKeyPressed(
+        _: *gtk.EventControllerKey,
+        keyval: c_uint,
+        _: c_uint,
+        _: gdk.ModifierType,
+        self: *Self,
+    ) callconv(.c) c_int {
+        switch (keyval) {
+            gdk.KEY_Escape => {
+                self.returnFocusToTerminal();
+                return 1;
+            },
+            gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_space => {
+                self.activatePosition(self.private().model.getSelected());
+                return 1;
+            },
+            else => return 0,
+        }
+    }
+
+    /// Escape's exit: hand focus back to the terminal without switching tabs.
+    /// syncSelection runs first so a highlight the user moved with the arrows
+    /// but never activated snaps back to the live tab, rather than being
+    /// stranded on a row that isn't the one on screen.
+    fn returnFocusToTerminal(self: *Self) void {
+        self.syncSelection();
+
+        const priv = self.private();
+        const tab_view = priv.tab_view orelse return;
+        const page = tab_view.getSelectedPage() orelse return;
         const tab = gobject.ext.cast(Tab, page.getChild()) orelse return;
         if (tab.getActiveSurface()) |surface| surface.grabFocus();
     }
@@ -606,6 +688,7 @@ pub const Sidebar = extern struct {
 
             // Template Callbacks
             class.bindTemplateCallback("row_activated", &rowActivated);
+            class.bindTemplateCallback("view_key_pressed", &viewKeyPressed);
 
             // Virtual methods
             gobject.Object.virtual_methods.dispose.implement(class, &dispose);
