@@ -65,6 +65,17 @@ pub const SidebarRow = extern struct {
         /// upstream; hiding that bar took it away, so the sidebar restores it.
         menu: *gtk.PopoverMenu,
 
+        /// Starts a drag carrying this row's page. The content is built
+        /// lazily in `dragPrepare`, not stored here, because rows are
+        /// recycled -- the page a drag started on must be read at drag
+        /// time, same reasoning as `livePage`.
+        drag_source: *gtk.DragSource,
+
+        /// Accepts a page dropped on this row and reorders the tab view to
+        /// match. Its accepted GType is restricted to `AdwTabPage` in
+        /// `init`, since blueprint has no syntax for a GType list.
+        drop_target: *gtk.DropTarget,
+
         /// Actions the menu items target, scoped to this row under "row".
         action_group: ?*gio.SimpleActionGroup = null,
 
@@ -88,6 +99,11 @@ pub const SidebarRow = extern struct {
     fn init(self: *Self, _: *Class) callconv(.c) void {
         gtk.Widget.initTemplate(self.as(gtk.Widget));
         self.initActionMap();
+
+        // Reject anything that isn't a tab page -- there is no other kind
+        // of drag this row should ever accept.
+        var drop_target_types = [_]gobject.Type{adw.TabPage.getGObjectType()};
+        self.private().drop_target.setGtypes(&drop_target_types, drop_target_types.len);
 
         // Rows are recycled: when the factory rebinds this row to another
         // tab, the dot must follow the new tab, not keep the old one's colour.
@@ -372,6 +388,60 @@ pub const SidebarRow = extern struct {
         self.closeTab();
     }
 
+    /// Build the drag content when a drag actually starts on this row.
+    /// Read at drag time rather than kept on `priv`, for the same
+    /// recycling reason `livePage` exists: nothing guarantees the page
+    /// this row showed when the drag gesture first touched down is still
+    /// the one it shows once the drag threshold is crossed.
+    fn dragPrepare(
+        _: *gtk.DragSource,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) ?*gdk.ContentProvider {
+        const page = self.livePage() orelse return null;
+
+        var value = std.mem.zeroes(gobject.Value);
+        _ = value.init(adw.TabPage.getGObjectType());
+        defer value.unset();
+        value.setObject(page.as(gobject.Object));
+
+        return gdk.ContentProvider.newForValue(&value);
+    }
+
+    /// A tab page was dropped on this row: move it to this row's position
+    /// in the tab view. This reuses `AdwTabView.reorderPage` -- the exact
+    /// primitive `Window.moveTab` already ends with -- rather than
+    /// reimplementing reordering; the sidebar's grouped/sorted model
+    /// (`sortCompare` in sidebar.zig) picks the new order up on its own
+    /// because it tiebreaks equal-group pages by tab-view position.
+    fn rowDrop(
+        _: *gtk.DropTarget,
+        value: *gobject.Value,
+        _: f64,
+        _: f64,
+        self: *Self,
+    ) callconv(.c) c_int {
+        if (!ext.gValueHolds(value, adw.TabPage.getGObjectType())) return 0;
+        const obj = value.getObject() orelse return 0;
+        const source_page = gobject.ext.cast(adw.TabPage, obj) orelse return 0;
+
+        const target_page = self.livePage() orelse return 0;
+        if (source_page == target_page) return 0;
+
+        const window = ext.getAncestor(Window, self.as(gtk.Widget)) orelse return 0;
+        const tab_view = window.getTabView();
+
+        // The source page must also still be live in this same tab view --
+        // a page from a different window's sidebar has no position here.
+        const desired_pos = tab_view.getPagePosition(source_page);
+        if (desired_pos < 0) return 0;
+        const target_pos = tab_view.getPagePosition(target_page);
+        if (target_pos < 0) return 0;
+
+        return @intFromBool(tab_view.reorderPage(source_page, target_pos) != 0);
+    }
+
     fn closeTab(self: *Self) void {
         const page = self.livePage() orelse return;
         const window = ext.getAncestor(
@@ -427,9 +497,13 @@ pub const SidebarRow = extern struct {
             class.bindTemplateChildPrivate("menu", .{});
             class.bindTemplateChildPrivate("colour_dot", .{});
             class.bindTemplateChildPrivate("panes_box", .{});
+            class.bindTemplateChildPrivate("drag_source", .{});
+            class.bindTemplateChildPrivate("drop_target", .{});
             class.bindTemplateCallback("close_clicked", &closeClicked);
             class.bindTemplateCallback("right_click", &rightClick);
             class.bindTemplateCallback("computed_cwd", &closureCwd);
+            class.bindTemplateCallback("drag_prepare", &dragPrepare);
+            class.bindTemplateCallback("row_drop", &rowDrop);
 
             gobject.ext.registerProperties(class, &.{
                 properties.page.impl,
