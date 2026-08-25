@@ -510,12 +510,33 @@ def cmd_scroll_colour():
     was tried first and left the window without X input focus for keyboard
     events; resizing an already-focused window after tab creation avoids
     that and needs no keyboard input itself (only XTEST pointer events,
-    which don't require input focus)."""
+    which don't require input focus).
+
+    Reference-window resize + colour_row bypass: ROW1/HAMBURGER (module-
+    level) and colour_row()'s own positive control are calibrated for the
+    ~922x722 window a real window manager gives; a bare X server (Xephyr
+    here, xvfb in CI) hands out an undecorated 800x600 window instead,
+    where both the frozen close-button band AND HAMBURGER=(724,78) land
+    wrong. This is the same root cause cmd_drag_reorder (l.672-726) already
+    measured and worked around -- resize to the reference size, scan the
+    close-button band instead of assuming it, and skip colour_row's own
+    stale hamburger-menu positive control (still wrong even after the
+    resize -- see cmd_drag_reorder's comment) in favour of the row's own
+    context-menu popover as positive-control-enough evidence."""
     s = Session()
     try:
+        s.win.configure(width=922, height=722)
+        s.d.sync()
+        time.sleep(1.0)
+        g = s.win.get_geometry()
+        s.ww, s.wh = g.width, g.height
+        log(f"task11: resized to reference window {s.ww}x{s.wh}")
+
         s.open_tabs(5)  # 6 total with the initial tab
 
-        geom = s.measure_row_geometry()
+        close_btn_band = _scan_close_btn_band(s)
+        log(f"task11: close-button band SCANNED at x={close_btn_band} (window {s.ww}x{s.wh})")
+        geom = s.measure_row_geometry(close_btn_x=close_btn_band)
         if geom["step_y"] is None:
             raise RuntimeError("cmd_scroll_colour: could not measure row spacing "
                                 "(fewer than 2 rows detected with 6 tabs open)")
@@ -523,8 +544,28 @@ def cmd_scroll_colour():
         log(f"task11: measured row1_y={row1_y} step_y={step_y} (not the hardcoded "
             "ROW_STEP_Y=66 an earlier version used, which was wrong -- true spacing is 54px)")
 
-        s.colour_row((ROW1[0], round(row1_y)), 4, "row1")  # Red
-        s.colour_row((ROW1[0], round(row1_y + step_y)), 1, "row2")  # Blue
+        # colour_row()'s own hamburger-menu positive control is stale here
+        # (module-level HAMBURGER=(724,78), see docstring above) -- open
+        # each row's context menu directly instead, same workaround
+        # cmd_drag_reorder uses. Row-click x=40 (title text), not
+        # ROW1[0]=160, since the scanned close-button band ((130,162)-ish
+        # on this reference window) sits close enough to 160 to eat a
+        # right-click meant for the row title.
+        def colour_row_no_hamburger_ctrl(row_y, colour_index, label):
+            menu = s.probe_click(40, round(row_y), button=3, label=f"{label}-menu", dismiss=False)
+            if menu is None:
+                raise RuntimeError(f"row context menu did not open for {label}")
+            colour_x = menu["x"] + menu["w"] // 2
+            colour_y = menu["y"] + 75  # "Colour" item center in the 276x156 reference menu
+            s.click_root(colour_x, colour_y)
+            win = s.d.create_resource_object("window", menu["id"])
+            mg = win.get_geometry()
+            item_x = mg.x + mg.width // 2
+            item_y = mg.y + 76 + 32 * colour_index
+            s.click_root(item_x, item_y)
+
+        colour_row_no_hamburger_ctrl(row1_y, 4, "row1")  # Red
+        colour_row_no_hamburger_ctrl(row1_y + step_y, 1, "row2")  # Blue
 
         before_shot = os.path.join(ARTIFACT_DIR, "task11-coloured-before-scroll.png")
         os.makedirs(ARTIFACT_DIR, exist_ok=True)
