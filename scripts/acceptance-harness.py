@@ -428,6 +428,7 @@ class Session:
                 gap += 1
 
         centers = [(g0 + g1) / 2 for g0, g1 in groups]
+        heights = [g1 - g0 + 1 for g0, g1 in groups]
         if not centers:
             raise RuntimeError("measure_row_geometry: no sidebar rows detected -- "
                                 "is the sidebar visible and at least one tab open?")
@@ -437,8 +438,8 @@ class Session:
             diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
             step_y = diffs[len(diffs) // 2]  # median
 
-        log(f"measure_row_geometry: centers={centers} step_y={step_y}")
-        return {"row1_y": centers[0], "step_y": step_y, "centers": centers}
+        log(f"measure_row_geometry: centers={centers} step_y={step_y} heights={heights}")
+        return {"row1_y": centers[0], "step_y": step_y, "centers": centers, "heights": heights}
 
     def close(self):
         try:
@@ -1044,8 +1045,10 @@ def cmd_panes():
                 "jamais ete ouverts parce que les frappes n'atteignent pas le client")
         c1, c2, c3 = (round(c) for c in geom0["centers"][:3])
         step0 = geom0["step_y"]
+        row_h0 = sorted(geom0["heights"][:3])[1]  # median of the 3 baseline rows
         spacing_uniform = abs((c2 - c1) - (c3 - c2)) <= 3
-        log(f"panes: baseline rows at y={c1}/{c2}/{c3} step={step0} uniform={spacing_uniform}")
+        log(f"panes: baseline rows at y={c1}/{c2}/{c3} step={step0} "
+            f"heights={geom0['heights']} uniform={spacing_uniform}")
         if not spacing_uniform:
             log("POSITIVE CONTROL FAILED — row spacing isn't uniform before any split; "
                 "refusing to trust deltas measured against it")
@@ -1062,6 +1065,34 @@ def cmd_panes():
                 f"centers={geom1['centers']} sur une fenetre {s.ww}x{s.wh} — mesure sur "
                 "bare X : les sous-rangees de pane repoussent la 3e hors de portee du "
                 "detecteur. A rejouer sur une fenetre geree par un WM")
+
+        # geom1 can hold MORE than 3 bands after a split: the pane sub-rows
+        # a split adds sit in the same x-band as a tab row's close button
+        # (measured on this env: real tab rows are row_h0-tall, the extra
+        # post-split bands are visibly shorter -- e.g. 10px vs 7px on a
+        # 922x722 Xephyr window) and this detector has no way, from the
+        # close-button band alone, to tell "a pane sub-row" from "a tab
+        # row that happens to be shorter". Picking centers[:3] blindly
+        # would silently mix a pane sub-row into the tab-row triplet and
+        # report a wrong gap-grew verdict from it. Refuse that: if there
+        # are more than 3 bands and any of them departs from the baseline
+        # row height, this is NOT DIAGNOSED as split-detector-correctness
+        # -- abstain naming the ambiguity instead of guessing.
+        if len(geom1["centers"]) > 3:
+            off_height = [h for h in geom1["heights"] if abs(h - row_h0) > 2]
+            if off_height:
+                return _abstain(
+                    "measure_row_geometry ne distingue pas une sous-rangee de pane "
+                    "d'une rangee d'onglet dans la bande du bouton de fermeture",
+                    f"APRES split: centers={geom1['centers']} heights={geom1['heights']} "
+                    f"(baseline row height={row_h0}) — {len(geom1['centers'])} bandes "
+                    "detectees pour 3 rangees d'onglet reelles ; au moins une bande a une "
+                    "hauteur qui s'ecarte de la baseline, signature d'une sous-rangee de "
+                    "pane comptee comme rangee. Prendre centers[:3] donnerait un verdict "
+                    "gap_grew NON FIABLE (bande de pane melangee au triplet) -- NON "
+                    "DIAGNOSTIQUE en l'etat, distinct du remede scelle de "
+                    "_measure_sidebar_column. A traiter dans un suivi separe.")
+
         n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
         log(f"panes: after split rows at y={n1}/{n2}/{n3}")
 
