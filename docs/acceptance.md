@@ -25,6 +25,63 @@ broken twice, and nothing but a human reading a log ever caught it.
 
 ## XTEST harness
 
+### Prerequisites — how to actually run any of this
+
+The commands below were unrunnable from a fresh clone: they name a `.xvenv`
+that nothing in this repository creates, documents, or lists the contents of.
+The working recipe existed only inside `.github/workflows/fork-ci.yml`, which
+is not where someone trying to *reproduce* a measurement looks. Both routes
+are written out here, as measured on 2026-08-25.
+
+**What the harness actually needs:** two Python packages — `Xlib`
+(`python-xlib`) and `PIL` (`pillow`) — an X display, and a ghostty binary at
+`zig-out/bin/ghostty`.
+
+**Route 1 — what CI really does** (`fork-ci.yml`, no venv at all):
+
+```bash
+sudo apt-get install -y python3-xlib python3-pil xvfb
+xvfb-run --auto-servernum -- python3 scripts/acceptance-harness.py --none-shortcut
+```
+
+**Route 2 — locally, when the system Python lacks those modules** (it does on
+a stock Ubuntu desktop: `import Xlib` and `import PIL` both raise
+`ModuleNotFoundError`). This is where `.xvenv` comes from:
+
+```bash
+python3 -m venv .xvenv
+.xvenv/bin/pip install python-xlib pillow
+echo '.xvenv/' >> .git/info/exclude          # NOT .gitignore -- see below
+```
+
+`.xvenv/` belongs in `.git/info/exclude`, deliberately: `.gitignore` is an
+upstream file and every line the fork adds to it widens the rebase surface
+(the fork modifies six upstream files; `.gitignore` is not one of them, and
+keeping it that way is the point). The cost is that `info/exclude` is local
+to one clone and is never cloned — so each checkout has to add the line
+again, which is why it is written here rather than assumed.
+
+**The display.** CI uses `xvfb-run`. On a Wayland desktop session, all three
+of these are needed together, and a nested X server to point at:
+
+```bash
+Xephyr :2 -screen 1400x900 -ac -noreset &
+DISPLAY=:2 GDK_BACKEND=x11 WAYLAND_DISPLAY= .xvenv/bin/python3 scripts/acceptance-harness.py --menu
+```
+
+Emptying `WAYLAND_DISPLAY` is not optional: with it set, GTK goes back to
+Wayland regardless of `GDK_BACKEND`, the window is not an X window, and
+synthetic clicks never take focus — the harness then reports a positive
+control failure rather than a result, which is correct but wastes a run.
+
+**The binary.** Every mode launches `zig-out/bin/ghostty`. To measure a
+binary built elsewhere — a release archive, another worktree's build —
+symlink it in rather than copying: `mkdir -p zig-out/bin && ln -sf
+<path-to-binary> zig-out/bin/ghostty`. `launch_ghostty` raises with this
+same advice if the path is missing.
+
+### Modes
+
 ```bash
 .xvenv/bin/python3 scripts/acceptance-harness.py --hamburger      # positive control only
 .xvenv/bin/python3 scripts/acceptance-harness.py --menu           # Task 9: row context menu
@@ -32,7 +89,14 @@ broken twice, and nothing but a human reading a log ever caught it.
 .xvenv/bin/python3 scripts/acceptance-harness.py --none-parity    # none-mode UI parity
 .xvenv/bin/python3 scripts/acceptance-harness.py --none-shortcut  # none-mode Ctrl+Shift+B no-op, stricter
 .xvenv/bin/python3 scripts/acceptance-harness.py --drag-reorder   # tab drag-to-reorder, with a move_tab:1 control
+.xvenv/bin/python3 scripts/acceptance-harness.py --panes           # v1.1: pane sub-rows under a split tab's row
+.xvenv/bin/python3 scripts/acceptance-harness.py --a11y-focus      # keyboard path into the list, and back out
+.xvenv/bin/python3 scripts/acceptance-harness.py --section-header  # the header names the repo at t0, not at t1
 ```
+
+Three of those modes were missing from this list while present in the
+harness (`--panes`, `--a11y-focus`, `--section-header`) — a reader following
+this document alone would not have known they existed.
 
 A GTK4 popover on X11 is a separate override-redirect X window, not a region
 of the parent — screenshotting the parent misses it every time, which is what
