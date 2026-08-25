@@ -1067,31 +1067,36 @@ def cmd_panes():
                 "detecteur. A rejouer sur une fenetre geree par un WM")
 
         # geom1 can hold MORE than 3 bands after a split: the pane sub-rows
-        # a split adds sit in the same x-band as a tab row's close button
-        # (measured on this env: real tab rows are row_h0-tall, the extra
-        # post-split bands are visibly shorter -- e.g. 10px vs 7px on a
-        # 922x722 Xephyr window) and this detector has no way, from the
-        # close-button band alone, to tell "a pane sub-row" from "a tab
-        # row that happens to be shorter". Picking centers[:3] blindly
-        # would silently mix a pane sub-row into the tab-row triplet and
-        # report a wrong gap-grew verdict from it. Refuse that: if there
-        # are more than 3 bands and any of them departs from the baseline
-        # row height, this is NOT DIAGNOSED as split-detector-correctness
-        # -- abstain naming the ambiguity instead of guessing.
+        # a split adds sit in the same x-band as a tab row's close button,
+        # and this detector has no way, from the close-button band alone,
+        # to tell "a pane sub-row" from a real tab row. Picking centers[:3]
+        # blindly would silently mix a pane sub-row into the tab-row
+        # triplet and report a wrong gap-grew verdict from it.
+        #
+        # The count alone is enough to catch this, with NO threshold: 3
+        # real tabs open, more than 3 bands detected -> the data is
+        # contaminated, period. A height-based gate was tried first (>2px
+        # off row_h0) and it does not hold: measured 7px sub-rows against a
+        # 10px baseline on one window (gap 3, caught), 9px against 10px on
+        # another (gap 1, missed) -- a threshold derived from a single
+        # measurement and frozen, the exact family of bug this repo has
+        # hit six times now (ROW1, the 260 column, close_btn (216,234), the
+        # hamburger band, _measure_sidebar_column's own split defect, and
+        # this one). Heights are kept in the abstention's DETAIL for the
+        # follow-up, never in the CONDITION.
         if len(geom1["centers"]) > 3:
-            off_height = [h for h in geom1["heights"] if abs(h - row_h0) > 2]
-            if off_height:
-                return _abstain(
-                    "measure_row_geometry ne distingue pas une sous-rangee de pane "
-                    "d'une rangee d'onglet dans la bande du bouton de fermeture",
-                    f"APRES split: centers={geom1['centers']} heights={geom1['heights']} "
-                    f"(baseline row height={row_h0}) — {len(geom1['centers'])} bandes "
-                    "detectees pour 3 rangees d'onglet reelles ; au moins une bande a une "
-                    "hauteur qui s'ecarte de la baseline, signature d'une sous-rangee de "
-                    "pane comptee comme rangee. Prendre centers[:3] donnerait un verdict "
-                    "gap_grew NON FIABLE (bande de pane melangee au triplet) -- NON "
-                    "DIAGNOSTIQUE en l'etat, distinct du remede scelle de "
-                    "_measure_sidebar_column. A traiter dans un suivi separe.")
+            return _abstain(
+                "measure_row_geometry ne distingue pas une sous-rangee de pane "
+                "d'une rangee d'onglet dans la bande du bouton de fermeture",
+                f"APRES split: centers={geom1['centers']} heights={geom1['heights']} "
+                f"(baseline row height={row_h0}) — {len(geom1['centers'])} bandes "
+                "detectees pour 3 rangees d'onglet reelles connues (ouvertes par ce "
+                "run). Le compte seul suffit : plus de bandes que d'onglets reels veut "
+                "dire des donnees contaminees, quelle que soit la hauteur des bandes en "
+                "trop. Prendre centers[:3] donnerait un verdict gap_grew NON FIABLE "
+                "(bande de pane melangee au triplet) -- NON DIAGNOSTIQUE en l'etat, "
+                "distinct du remede scelle de _measure_sidebar_column. A traiter dans "
+                "un suivi separe.")
 
         n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
         log(f"panes: after split rows at y={n1}/{n2}/{n3}")
