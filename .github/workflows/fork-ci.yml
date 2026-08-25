@@ -281,10 +281,3 @@ jobs:
           xvfb-run --auto-servernum --
           sh scripts/acceptance-abstain-gate.sh menu --
           python3 scripts/acceptance-harness.py --menu
-
-      # TEMPORARY — control-C run for the ratchet's other half, removed
-      # before merge. "demo-stale" is listed in acceptance-abstentions.txt
-      # but backed by `true` (always exit 0): a listed mode that stops
-      # abstaining must turn this step RED.
-      - name: TEMP control-C — listed mode that stops abstaining
-        run: sh scripts/acceptance-abstain-gate.sh demo-stale -- true

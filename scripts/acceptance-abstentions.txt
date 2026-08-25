@@ -25,4 +25,3 @@
 # abstention is a hole in coverage, not a known limitation.
 
 menu|HAMBURGER's hardcoded click coordinate was calibrated on a differently-sized window and misses its target on the CI xvfb display (800x600), so --menu's positive control (the hamburger click) fails before the row-menu probe ever runs — needs a coordinate scanned at runtime, not a frozen one (a launch-directory-dependent drift measured on the unrelated close-button band is reason enough not to trust a baked-in pixel value across environments)|HAMBURGER-calibration
-demo-stale|TEMPORARY control-C fixture for the abstention ratchet PR — proves a listed mode that returns 0 (not 2) turns RED. Backed by `true` in fork-ci.yml. Removed before merge.|abstention-cliquet-fork-ci-control-c
