@@ -195,6 +195,10 @@ class Session:
     """One ghostty process + its X connection, window handle, and absolute origin."""
 
     def __init__(self, extra_config="", sidebar_mode="left", cwd=None):
+        self.cwd = cwd or os.getcwd()  # declared, not left implicit -- the sidebar's tab
+                                        # title is the cwd, so its width (and therefore
+                                        # where the row's own close button lands) depends
+                                        # on this same as it depends on window geometry
         self.proc = launch_ghostty(extra_config, sidebar_mode, cwd=cwd)
         time.sleep(6.0)  # window map + first paint settle (proven recipe)
         self.d = display.Display(os.environ.get("DISPLAY", ":0"))
@@ -599,13 +603,32 @@ def cmd_menu():
         # depends on which build you happen to be pointing at is not a
         # measurement. measure_row_geometry() finds the rows by their close
         # button, so it lands on a real row on either build.
-        geom = s.measure_row_geometry()
+        #
+        # close_btn_x is SCANNED (_scan_close_btn_band), not left at
+        # measure_row_geometry's frozen default (216,234): on the CI xvfb
+        # window (800x600, cwd=REPO_ROOT here) that default finds only ONE
+        # row band ([112.0], step_y=None, height=9px) instead of the real
+        # row -- cmd_drag_reorder and cmd_scroll_colour already worked
+        # around the same frozen-band gap for their own row detection.
+        #
+        # The right-click itself lands at x=40 (row title text), not
+        # ROW1[0]=160: cmd_scroll_colour (l.665-667) and cmd_drag_reorder
+        # (l.866-868) both document x=160 landing on the row's OWN close
+        # button instead of the row body on a narrow window, and cmd_menu
+        # was the one mode still clicking there -- a "confirmed ABSENT"
+        # from a right-click that hit the close button proves nothing about
+        # whether the row's context menu exists; it is a false negative,
+        # same shape as trusting TAB_OVERVIEW without probing it.
+        band = _scan_close_btn_band(s)
+        log(f"menu: close-button band SCANNED at x={band} (window {s.ww}x{s.wh}, cwd={s.cwd})")
+        geom = s.measure_row_geometry(close_btn_x=band)
         row1_y = round(geom["row1_y"])
-        log(f"menu: row centers measured at {geom['centers']} -- right-clicking y={row1_y}")
-        result = s.probe_click(ROW1[0], row1_y, button=3, label="row-context-menu")
+        log(f"menu: row centers measured at {geom['centers']} -- right-clicking (40, {row1_y})")
+        result = s.probe_click(40, row1_y, button=3, label="row-context-menu")
         if result is None:
             log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run, "
-                f"and the right-click landed on a MEASURED row center y={row1_y}, not a guessed one)")
+                f"and the right-click landed on a MEASURED row center y={row1_y} at x=40 -- row "
+                "title text, not the row's own close button -- not a guessed coordinate)")
             return 1
         log(f"row-context-menu: PRESENT — 0x{result['id']:x} {result['w']}x{result['h']} -> {result['png']}")
         return 0
