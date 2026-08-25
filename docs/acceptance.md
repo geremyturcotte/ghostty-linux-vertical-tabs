@@ -174,6 +174,66 @@ Each mode launches its own isolated ghostty process and prints its evidence
 (a popover's X window id, or a structural pixel measurement) plus PNGs under
 `.prokai/tmp/dispatch-artifacts/` (gitignored, regenerated per run).
 
+## The rule every verdict in this document must satisfy
+
+A **verdict is as perishable as a number.** `Measured` without a date is a
+claim that can be true when written and false an hour later, with no line of
+this document changing to say so. That is not hypothetical: the
+drag-and-drop item published *"Measured: the feature does not exist"* while
+the same tree wired `GtkDragSource`/`GtkDropTarget` and the released binary
+passed this fork's own `--drag-reorder`. It was caught by chance, by running
+the mode.
+
+**Every `Measured` verdict carries five things**, on the line or right after
+it:
+
+1. **the date** of the measurement;
+2. **the binary** — sha256 of the published artefact, or commit sha plus
+   build time for a local build. *A verdict measured on a local build is
+   about that build, not about the product;* the case above was true of a
+   binary built at 11:30 and false of the commit that landed at 17:43 the
+   same day;
+3. **the code sha** the verdict is about — so *"is this verdict older than
+   the last behaviour change?"* is a mechanical question and not a manual
+   audit. **That sha names the PRODUCT**, and it is not automatically the sha
+   the *instrument* ran at: a published binary is built from one commit while
+   the harness measuring it lives at another. When the two differ, say so and
+   say what moved between them. This document already carries the case — the
+   section-header verdict above cites binary `v1.3.1-sidebar.3` (built from
+   `b4489d474`) beside code `9a543aa22`; `git diff b4489d474 9a543aa22 --
+   src/` is **empty**, so the product did not move and the verdict holds,
+   while `scripts/acceptance-harness.py` moved by `+223/-18` — additively,
+   with `thresh = 150` unchanged — which is why the probe reading is still
+   comparable. Two shas with nothing said about the gap invites the reader to
+   assume the binary came from the code;
+4. **the mode** of `scripts/acceptance-harness.py` that produced it, or `by
+   hand` written out. This is what makes a verdict *replayable* rather than
+   merely auditable;
+5. **the variables known to bite**, currently: the **launch directory**, the
+   **window geometry**, and the **display**. A variable that has bitten once
+   joins this list and is declared from then on. The launch directory earns
+   its place: it moves the harness's scanned close-button band to `(172,204)`,
+   `(166,198)` or `(124,156)` on one and the same window.
+
+**A refutation is a measurement and carries the same five.** *"Not measured"*
+and *"refuted"* are not the same statement: the first is an abstention and
+costs no evidence, the second is a positive claim wearing the clothes of a
+limit. This document has already carried a refutation that was false, written
+from a screenshot belonging to a different run than the measurement it
+claimed to overturn.
+
+**Old verdicts are not back-dated from `git blame`.** The date a *line* was
+written is not the date the *measurement* was taken; filling one in from the
+other would manufacture exactly the false precision this rule exists to
+prevent, and would do it under the appearance of a correction. Verdicts
+predating this rule stay undated and are marked as such until a run re-dates
+them.
+
+`scripts/acceptance-verdict-audit.py` reports, mechanically, which verdicts
+were written before the code they assert last changed — by ancestry, never by
+date, since a rebase rewrites dates and this repository rebases routinely. It
+does not say whether a verdict is *true*: only a run says that.
+
 ## Regression — the escape hatch
 
 `none` is the one promise this fork makes unconditionally. It has already been
