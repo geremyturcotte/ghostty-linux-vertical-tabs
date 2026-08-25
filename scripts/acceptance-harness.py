@@ -2074,9 +2074,56 @@ def _movers(ratios, floor=0.03, quiet_frac=0.5):
 
 def _longest_uniform_run(centers, tol=6):
     """The longest contiguous subsequence of `centers` whose consecutive gaps
-    are all within `tol` of the run's own step. Tab rows are evenly spaced;
-    terminal text lines picked up by a mis-placed scan band are not, so this is
-    what separates the real rows from noise regardless of where the band fell."""
+    are all within `tol` of the run's own step.
+
+    The premise this docstring used to state is INVERTED. It read: "Tab rows
+    are evenly spaced; terminal text lines picked up by a mis-placed scan band
+    are not, so this is what separates the real rows from noise regardless of
+    where the band fell." Terminal text lines are a character grid: their
+    leading is constant BY CONSTRUCTION, which makes them the most evenly
+    spaced thing on the screen.
+
+    Measured 2026-08-25 -- binary `v1.3.1-sidebar.3` sha256 `63caaf67...5a2ab`
+    (checked against the release's SHA256SUMS), code `48a576d80`, a probe
+    instrumenting `_detect_tab_rows`'s own candidate loop, Xephyr `:7`, window
+    800x600, launch directory declared: candidate bands falling on the
+    terminal returned runs with steps of 18, 21, 21, 21, 22, 22, 22.5, 22.5
+    and 24 px, and a failing `--a11y-focus` run reported centers
+    [66, 85, 104] -- 19.5 px, uniform across three points. Regularity does not
+    separate rows from terminal noise: the noise is MORE regular than the
+    signal, so this run-length criterion cannot discriminate "regardless of
+    where the band fell". It is not missing a tie-break; its premise is false.
+
+    What it DOES do, executed rather than asserted (each list run through this
+    function at `48a576d80`):
+
+        [94.5, 131.5, 187.5, 243.5] -> [131.5, 187.5, 243.5]
+        [93.0, 140.5, 196.5, 252.5] -> [140.5, 196.5, 252.5]
+        [10, 20, 30, 77]            -> [10, 20, 30]
+        [66, 85, 104]               -> [66, 85, 104]
+
+    It drops a single intruder sitting above otherwise regular rows -- the
+    first list is `cmd_panes`'s own recorded banner case, the second a
+    measured repository section header above three real rows -- and it keeps
+    everything when the whole band landed off the sidebar, because what it was
+    handed is uniform. Two different failures; a run-length criterion can only
+    see one of them.
+
+    Two detection chains exist in this file and neither knows the other
+    (call sites verified by AST at `48a576d80`):
+
+      A. `Session.measure_row_geometry` -- 5 call sites (`cmd_menu` l.488,
+         `cmd_scroll_colour` l.539, `cmd_drag_reorder` l.737, `cmd_panes`
+         l.1080 and l.1102). It never calls this function. Its only defence
+         against an intruding band is the frozen `y_scan=(105, None)` passed
+         at ONE of those five sites; the other three have nothing.
+      B. `_detect_tab_rows` -> this function -- reached only from
+         `cmd_a11y_focus` (l.2196, l.2202).
+
+    No remedy is proposed here and none is implied: the cause of the
+    band-lands-off-the-sidebar case has not been measured, and the frozen
+    `y_scan=(105, None)` is itself a threshold derived from one window and one
+    build. This is a description of what was measured, not a plan."""
     if len(centers) < 2:
         return centers[:]
     best = [centers[0]]
