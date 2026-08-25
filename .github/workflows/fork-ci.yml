@@ -113,7 +113,7 @@ jobs:
       # baseline — losing it blocks every run, not just this step.
       - name: Cache ghostty upstream .deb (mkasberg/ghostty-ubuntu 1.3.1-0-ppa2)
         id: cache-ghostty-deb
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/ghostty-upstream.deb
           key: ghostty-deb-1.3.1-0-ppa2${{ github.event.inputs.cache_bust }}
@@ -137,7 +137,7 @@ jobs:
       # no mirror this workflow falls back to.
       - name: Cache Zig 0.15.2
         id: cache-zig
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/opt/zig-0.15.2
           key: zig-0.15.2${{ github.event.inputs.cache_bust }}
@@ -162,7 +162,7 @@ jobs:
       # venv here also skips the pip resolve, not just the download.
       - name: Cache meson 1.12.0 + ninja 1.13.0
         id: cache-meson-ninja
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/opt/build-venv
           key: meson-1.12.0-ninja-1.13.0${{ github.event.inputs.cache_bust }}
@@ -184,7 +184,7 @@ jobs:
       # git clone, which is most of this step's cost.
       - name: Cache blueprint-compiler 0.22.2
         id: cache-blueprint
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.local/opt/blueprint-0.22.2
           key: blueprint-0.22.2${{ github.event.inputs.cache_bust }}
