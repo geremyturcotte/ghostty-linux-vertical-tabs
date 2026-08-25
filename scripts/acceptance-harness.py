@@ -1424,7 +1424,31 @@ def _measure_sidebar_column(img):
     then walk leftward while each column is still overwhelmingly that colour.
     Where that stops is the sidebar's right edge. Returns 0 when the terminal
     reaches the left edge -- i.e. there is NO sidebar at all, which is exactly
-    what `gtk-sidebar-tabs=none` must show."""
+    what `gtk-sidebar-tabs=none` must show.
+
+    A split defeats a naive version of this walk: it opens a SECOND terminal
+    pane to the left of the first one, separated by a 1px border. The two
+    panes' backgrounds are not bit-identical -- measured (40,44,53) vs
+    (40,44,52), one unit apart in the blue channel -- and the border between
+    them (69,69,69) is not terminal at all. A walk that requires an exact
+    colour match and never crosses a non-terminal column stops AT THE SPLIT
+    BORDER and reports the split's edge instead of the sidebar's: measured
+    576 (the split boundary) instead of 233 (the sidebar edge) on a
+    3-tabs-plus-split capture. Two changes fix it, and BOTH are required --
+    either alone leaves the walk stuck at the split boundary (measured on the
+    same capture: tolerance alone still 576, border-crossing alone still
+    576, only the combination reaches 233):
+
+    - `is_terminal` tolerates a distance of 1 per channel, so the second
+      pane's background still counts as "terminal" despite not being
+      bit-identical to the first.
+    - the walk may cross exactly ONE non-terminal column and keep going --
+      but only when the column beyond it resumes being terminal, which is
+      what distinguishes a 1px split border (terminal on both sides) from
+      the sidebar's own edge (terminal on one side, sidebar on the other:
+      crossing it would eat into the sidebar itself). Without splits there
+      is no such column to cross, so single-pane windows measure exactly as
+      before."""
     px = img.load()
     w, h = img.width, img.height
     y0, y1 = int(h * 0.55), int(h * 0.95)   # below the tab rows: quiet in both modes
@@ -1438,15 +1462,94 @@ def _measure_sidebar_column(img):
     term_bg = max(counts.items(), key=lambda kv: kv[1])[0]
 
     span = y1 - y0
+    tol = 1
 
     def is_terminal(x):
-        n = sum(1 for y in range(y0, y1) if px[x, y][:3] == term_bg)
+        n = sum(1 for y in range(y0, y1)
+                if all(abs(px[x, y][:3][i] - term_bg[i]) <= tol for i in range(3)))
         return n > 0.9 * span
 
     x = w - 8
-    while x > 0 and is_terminal(x - 1):
-        x -= 1
+    while x > 0:
+        if is_terminal(x - 1):
+            x -= 1
+            continue
+        if x - 2 >= 0 and is_terminal(x - 2):
+            x -= 2  # cross the 1px split border, terminal resumes beyond it
+            continue
+        break
     return x
+
+
+def cmd_sidebar_column_regression():
+    """Applies _measure_sidebar_column to four SELF-GENERATED stand-ins for
+    the majordome's four reference captures and requires the exact ground
+    truth measured off the real screenshots on 2026-08-25, instead of
+    shipping the PNGs themselves into the repo (a test that regenerates its
+    own fixtures is preferable to committing binaries the fork doesn't
+    otherwise need).
+
+    Three are built from the SAME colour profile the majordome read off a
+    real 922x722 window at y=541 (3 tabs + 1 split): sidebar (48,48,48) up
+    to x=232, a 1px separator (31,31,31), left pane (40,44,53) up to x=575,
+    a 1px split border (69,69,69), right pane (40,44,52) to the edge --
+    ground truth 233. The no-split cases place the same sidebar/terminal
+    boundary at x=202 and x=213 (the widths measured on the two real bare-X
+    captures); `none` mode is terminal-only, no sidebar column at all --
+    ground truth ~0.
+
+    THE CONTROL THAT MATTERS is the `none` row: a detector that finds a
+    sidebar-shaped boundary by, say, always stopping at the first
+    non-terminal column it meets would still pass the three sidebar cases
+    and fail this one -- which is exactly how the first attempt at this fix
+    was rejected (3/3 with a sidebar, 795 in `none`)."""
+    from PIL import Image
+
+    def make_column_image(w, h, segments):
+        img = Image.new("RGB", (w, h))
+        px = img.load()
+        for x0, x1, color in segments:
+            for x in range(x0, min(x1, w)):
+                for y in range(h):
+                    px[x, y] = color
+        return img
+
+    SIDEBAR, SEP, LEFT_PANE, SPLIT_SEP, RIGHT_PANE = (
+        (48, 48, 48), (31, 31, 31), (40, 44, 53), (69, 69, 69), (40, 44, 52))
+    TERM = (40, 44, 53)
+
+    cases = [
+        ("panes-big (3 tabs + split)", make_column_image(922, 722, [
+            (0, 232, SIDEBAR), (232, 233, SEP),
+            (233, 575, LEFT_PANE), (575, 576, SPLIT_SEP),
+            (576, 922, RIGHT_PANE),
+        ]), 233),
+        ("t1 (2 tabs, no split)", make_column_image(800, 600, [
+            (0, 213, SIDEBAR), (213, 214, SEP), (214, 800, TERM),
+        ]), 213),
+        ("t0 (1 tab, no split)", make_column_image(800, 600, [
+            (0, 202, SIDEBAR), (202, 203, SEP), (203, 800, TERM),
+        ]), 202),
+        ("none (no sidebar)", make_column_image(800, 600, [
+            (0, 800, TERM),
+        ]), 0),
+    ]
+
+    ok = True
+    for name, img, truth in cases:
+        got = _measure_sidebar_column(img)
+        passed = abs(got - truth) <= 2
+        ok = ok and passed
+        log(f"sidebar-column-regression: {name}: got={got} truth={truth} "
+            f"{'PASS' if passed else 'FAIL'}")
+
+    if not ok:
+        log("FAIL — _measure_sidebar_column did not reproduce the majordome's "
+            "ground truth on all four scenarios")
+        return 1
+    log("PASS — _measure_sidebar_column matches ground truth on all four "
+        "scenarios, including the none-mode control")
+    return 0
 
 
 def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH, y0=0):
@@ -2322,6 +2425,9 @@ def main():
                      help="a 1-tab window's section header must already show the repo name, "
                           "not \"No repository\", by the time a 2nd same-repo tab opens -- "
                           "band-diff measurement with a no-git positive control in the same run")
+    ap.add_argument("--sidebar-column-regression", action="store_true", dest="sidebar_column_regression",
+                     help="_measure_sidebar_column vs 4 self-generated stand-ins for the "
+                          "majordome's reference captures (no X server needed)")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -2342,6 +2448,8 @@ def main():
         return cmd_a11y_focus()
     if args.section_header:
         return cmd_section_header()
+    if args.sidebar_column_regression:
+        return cmd_sidebar_column_regression()
 
     ap.print_help()
     return 1
