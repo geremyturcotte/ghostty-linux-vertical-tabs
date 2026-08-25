@@ -59,7 +59,10 @@ ARTIFACT_DIR = os.path.join(REPO_ROOT, ".prokai", "tmp", "dispatch-artifacts")
 
 # Coordinates measured on the 922x722 reference window (docs/acceptance.md).
 ROW1 = (160, 133)
-HAMBURGER = (724, 78)
+HAMBURGER = (724, 78)  # stale off the 922x722 reference window; cmd_hamburger/cmd_menu now
+                        # scan the real position at runtime (_scan_hamburger_button) instead
+                        # of clicking this. Kept only as a reference value for that scan's
+                        # docstring and colour_row()'s (currently unused) fallback.
 HAMBURGER_MIN_SIZE = (200, 200)  # the real menu is 349x662; a "Menu principal" tooltip is 121x32
 TAB_OVERVIEW = (690, 78)  # negative control: in-window, opens 0 new X windows
 TERMINAL_FOCUS = (600, 300)
@@ -453,10 +456,112 @@ class Session:
             self.proc.kill()
 
 
+def _scan_hamburger_button(session, y_max=60, thresh=150, min_icon_width=10, max_ctrl_width_delta=3):
+    """The hamburger button's (x, y) center, SCANNED at runtime instead of
+    trusting the frozen module-level HAMBURGER=(724, 78).
+
+    HAMBURGER was measured on a ~922-wide window a real window manager
+    handed out. Under a bare X server (Xephyr locally, xvfb in CI) the
+    window is 800x600 and undecorated: measured 2026-08-25, same binary,
+    same display, same window, same cwd -- only the window-management state
+    differs -- the header row's icon glyphs sit at x~[28, 68, 96, 624, 658],
+    y~28, not x=724, y=78. A click at the frozen constant lands right of and
+    below the real button and opens nothing: probe_click reports
+    "nouvelles=0 remappees=0 popovers=0" every time, exactly cmd_hamburger's
+    POSITIVE CONTROL FAILED symptom.
+
+    Method: scan the header band (y in [0, y_max)) for columns with at
+    least one bright (>thresh in every channel) pixel -- the same "any
+    bright pixel in this scanline" grouping measure_row_geometry/
+    _detect_row_bands already use for sidebar rows, transposed to columns
+    instead of rows since the header lays its icons out horizontally, not
+    vertically. Each resulting band's y-center is the bright-pixel extent
+    within that column range. The header's rightmost three bands are always
+    the window controls (minimize/maximize/close): narrower (measured 8px)
+    and mutually within max_ctrl_width_delta of each other, unlike the
+    wider (measured 12-16px) content icons left of them. The hamburger
+    button is the band immediately to their left.
+
+    Confirmed identical (same relative offset from the window-control
+    cluster, same band width) across four resizes of the SAME running
+    window -- 800x600, 922x722, 1000x650, 760x580, via a raw ConfigureWindow
+    request, not a second launch -- and confirmed to actually open the menu:
+    on 800x600, clicking the derived center opened a 328x601 popover in the
+    same run where clicking the frozen HAMBURGER constant opened nothing.
+    Not a second frozen number: this scans fresh every call, so it tracks
+    whatever width the window actually has.
+
+    Returns (x, y), or None if fewer than 4 header bands were found, or the
+    trailing 3 aren't a clean same-width cluster -- nothing to anchor the
+    hamburger band on, which is a CANNOT_MEASURE, not a click attempt."""
+    img = session.screenshot()
+    px = img.load()
+    w, h = img.width, img.height
+    y_max = min(y_max, h)
+
+    cols = []
+    for x in range(w):
+        has = False
+        for y in range(y_max):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                has = True
+                break
+        cols.append(has)
+
+    groups = []
+    gap = 999
+    for i, has in enumerate(cols):
+        if has:
+            if gap > 2:
+                groups.append([i, i])
+            else:
+                groups[-1][1] = i
+            gap = 0
+        else:
+            gap += 1
+
+    bands = []
+    for x0, x1 in groups:
+        ys = []
+        for y in range(y_max):
+            for x in range(x0, x1 + 1):
+                r, g, b = px[x, y][:3]
+                if r > thresh and g > thresh and b > thresh:
+                    ys.append(y)
+                    break
+        bands.append({
+            "xc": (x0 + x1) / 2,
+            "w": x1 - x0 + 1,
+            "yc": (min(ys) + max(ys)) / 2 if ys else y_max / 2,
+        })
+
+    if len(bands) < 4:
+        return None
+    ctrl_widths = [b["w"] for b in bands[-3:]]
+    if max(ctrl_widths) - min(ctrl_widths) > max_ctrl_width_delta:
+        return None
+    hamburger = bands[-4]
+    if hamburger["w"] < min_icon_width:
+        return None
+    return (round(hamburger["xc"]), round(hamburger["yc"]))
+
+
 def cmd_hamburger():
     s = Session()
     try:
-        result = s.probe_click(*HAMBURGER, button=1, label="hamburger", min_size=HAMBURGER_MIN_SIZE)
+        ham = _scan_hamburger_button(s)
+        if ham is None:
+            return _abstain(
+                "hamburger button not found",
+                f"header-band scan on window {s.ww}x{s.wh} did not yield a clean "
+                "icon-band-before-window-controls layout to anchor on -- module-level "
+                f"HAMBURGER={HAMBURGER} was NOT used as a fallback (it is stale off-window "
+                "on this display, see _scan_hamburger_button's docstring)",
+            )
+        log(f"cmd_hamburger: hamburger button SCANNED at {ham} on window {s.ww}x{s.wh} "
+            f"(module-level HAMBURGER={HAMBURGER} is the pre-fix reference value, unused here)")
+        result = s.probe_click(*ham, button=1, label="hamburger", min_size=HAMBURGER_MIN_SIZE)
         if result is None:
             log("POSITIVE CONTROL FAILED")
             return 2
@@ -469,7 +574,16 @@ def cmd_hamburger():
 def cmd_menu():
     s = Session()
     try:
-        ctrl = s.probe_click(*HAMBURGER, button=1, label="hamburger-control", min_size=HAMBURGER_MIN_SIZE)
+        ham = _scan_hamburger_button(s)
+        if ham is None:
+            return _abstain(
+                "hamburger button not found",
+                f"header-band scan on window {s.ww}x{s.wh} did not yield a clean "
+                "icon-band-before-window-controls layout to anchor on",
+            )
+        log(f"cmd_menu: hamburger button SCANNED at {ham} on window {s.ww}x{s.wh} "
+            f"(module-level HAMBURGER={HAMBURGER} is the pre-fix reference value, unused here)")
+        ctrl = s.probe_click(*ham, button=1, label="hamburger-control", min_size=HAMBURGER_MIN_SIZE)
         if ctrl is None:
             log("POSITIVE CONTROL FAILED — refusing to report the row-menu result")
             return 2

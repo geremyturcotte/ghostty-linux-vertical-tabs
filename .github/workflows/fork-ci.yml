@@ -272,10 +272,14 @@ jobs:
       # of 2) is ALSO red — the entry is stale and must be removed, or the
       # ratchet is guarding nothing.
       #
-      # --menu is the first mode wired through it: on the CI xvfb display
-      # (800x600) its hamburger-click positive control misses, so it
-      # abstains (rc=2) today. See scripts/acceptance-abstentions.txt for
-      # the reason and the follow-up chantier.
+      # --menu was the first mode wired through it: on the CI xvfb display
+      # (800x600) its hamburger-click positive control used to miss (the
+      # click coordinate was a constant frozen on a differently-sized
+      # window) and it abstained (rc=2). Fixed by scanning the hamburger
+      # button's position at runtime instead (HAMBURGER-calibration) --
+      # --menu now passes (rc=0) and is no longer listed in
+      # scripts/acceptance-abstentions.txt; the gate above still applies to
+      # any mode that IS listed there.
       - name: menu (row context menu, with positive+negative controls)
         run: >-
           xvfb-run --auto-servernum --
