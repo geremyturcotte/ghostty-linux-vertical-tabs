@@ -1430,7 +1430,7 @@ def cmd_none_parity():
     # sequence echoing to the shell, and mislabels that as "the sidebar
     # toggled"). One detector, so the two commands can't contradict each
     # other on the same measurement.
-    none_shortcut_ratio = _shortcut_column_diff("none", "none-parity-shortcut")
+    none_shortcut_ratio, _, _ = _shortcut_column_diff("none", "none-parity-shortcut")
     no_shortcut = none_shortcut_ratio < 0.005  # cursor blink / AA jitter tolerance
     log(f"none: sidebar-column(x<{SIDEBAR_COLUMN_WIDTH}) shortcut diff_ratio={none_shortcut_ratio:.5f} "
         f"no_shortcut_effect={no_shortcut}")
