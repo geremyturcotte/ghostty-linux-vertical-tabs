@@ -116,9 +116,13 @@ Each mode launches its own isolated ghostty process and prints its evidence
 broken once, by a `GtkSingleSelection` that autoselected on an empty model and
 tripped an Adwaita assertion at window construction.
 
-- [ ] `--gtk-sidebar-tabs=none` is indistinguishable from upstream: tab bar
-      present, no sidebar, no sidebar shortcut. **Measured, partial FAIL on
-      this branch (`sidebar`) — a fix exists, unmerged, on a separate PR.**
+- [x] `--gtk-sidebar-tabs=none` is indistinguishable from upstream: tab bar
+      present, no sidebar, no sidebar shortcut. **Measured true on
+      2026-08-25, on the published `v1.3.1-sidebar.3` archive — not on a
+      local build.** The partial FAIL recorded below was real when it was
+      written and is kept verbatim as the record; the fix it points at
+      (PR #12, branch `none-inert`) merged on 2026-08-24T15:14:38Z and is
+      in `main`.
       `check-none-parity.sh` cannot verify this claim at all: it only diffs
       GTK/GLib *log* output, never a pixel or a widget, so it can pass with a
       sidebar visibly on screen in `none` mode as long as the logs happen to
@@ -160,6 +164,26 @@ tripped an Adwaita assertion at window construction.
       `--none-parity` and `--none-shortcut` PASS. Confirming a fix exists
       elsewhere doesn't change this measurement of the `sidebar` branch as
       it stands today: left unchecked here; the fix lands on its own PR.
+
+      **SUPERSEDED 2026-08-25 — the two paragraphs above are the record of a
+      state that no longer holds, kept rather than deleted.** PR #12 merged
+      (2026-08-24T15:14:38Z) and is in `main`. Re-measured against the
+      *published* archive `v1.3.1-sidebar.3` (`b4489d4`), not a local build:
+      `--none-shortcut` reports `diff_ratio 0.00000` on the sidebar column
+      in `none` mode, against `0.96637` for the identical gesture in `left`
+      mode in the same run — so the positive control confirms the gesture
+      *can* move that column, and the zero is a real absence of effect.
+      `check-none-parity.sh` on the same archive: `PASS —
+      gtk-sidebar-tabs=none is indistinguishable from upstream`, plus
+      `left` and `right` CRITICAL-free.
+
+      One correction to this item's own text while it is being updated: it
+      says `check-none-parity.sh` "cannot verify this claim at all"  because
+      it only diffs logs. That remains true *of that script*, and it is why
+      the CI no longer relies on it alone — `fork-ci.yml` also runs
+      `acceptance-harness.py --none-shortcut` under `xvfb`, which measures
+      the interface. The claim is now gated by a pixel test in CI, not by a
+      log diff.
 
       One measurement mistake worth recording since it briefly produced a
       wrong root-cause theory: an unbound `Ctrl+Shift+B` still reaches the
