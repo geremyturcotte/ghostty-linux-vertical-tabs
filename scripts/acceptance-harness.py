@@ -1004,18 +1004,38 @@ def cmd_panes():
             xtest.fake_input(d, X.KeyRelease, kc)
         d.sync()
 
-    log("mode --panes : NON DEMONTRABLE sur les affichages disponibles a ce jour.")
-    log("  bare X (xvfb/Xephyr, 800x600) : la 3e rangee disparait apres le split.")
-    log("  :0 avec un WM                 : les frappes n'atteignent pas le client")
-    log("                                  tant qu'une autre application tient le focus.")
     log(f"  Un echec ici sort en code {CANNOT_MEASURE} (ABSTENTION), jamais en FAIL nu.")
     s = Session()
     try:
+        # A bare X server (Xephyr/xvfb) hands out an 800x600 window, and at
+        # that size the 3rd tab row is pushed out of the window entirely
+        # once the split adds pane sub-rows -- measured: geom1's centers
+        # drop below 3, and the run abstains instead of measuring anything.
+        # Resizing to the reference window up front (the same pattern
+        # cmd_drag_reorder already uses) gives the split room to grow into,
+        # same as the ~922x722 a real window manager hands out.
+        s.win.configure(width=922, height=722)
+        s.d.sync()
+        time.sleep(1.0)
+        g = s.win.get_geometry()
+        s.ww, s.wh = g.width, g.height
+        log(f"panes: resized to reference window {s.ww}x{s.wh}")
+
         s.open_tabs(2)  # 3 total; rank 3 (index 2) is focused
         band = _scan_close_btn_band(s)
         log(f"panes: close-button band SCANNED at x={band} "
             f"(window {s.ww}x{s.wh}) -- not the frozen (216, 234)")
-        geom0 = s.measure_row_geometry(close_btn_x=band)
+        # y_scan's own default (60, None) starts inside the Debug build's
+        # "Vous utilisez une version de debogage" banner, which is bright
+        # enough in this same x-band to register as a 4th, narrower "row"
+        # above the 3 real ones -- measured: centers=[94.5, 131.5, 187.5,
+        # 243.5] on a 922x722 window, where the last 3 are evenly spaced
+        # (56px apart, the real rows) and the first is not (37px to the
+        # next). Starting the scan at y=105 -- below every measured banner
+        # pixel (up to y=98), above the first real row's close button
+        # (from y=127) -- drops that false row without touching anything
+        # the banner-free reference windows already relied on.
+        geom0 = s.measure_row_geometry(close_btn_x=band, y_scan=(105, None))
         if geom0["step_y"] is None or len(geom0["centers"]) < 3:
             return _abstain(
                 "le detecteur n'a pas trouve les 3 rangees d'onglet AVANT le split",
@@ -1035,7 +1055,7 @@ def cmd_panes():
         send_combo(s.d, [ctrl_kc_sym, shift_kc_sym], o_kc_sym)  # new_split:right
         time.sleep(1.2)  # idleAdd-debounced tree rebuild + relayout + paint
 
-        geom1 = s.measure_row_geometry(close_btn_x=band)
+        geom1 = s.measure_row_geometry(close_btn_x=band, y_scan=(105, None))
         if len(geom1["centers"]) < 3:
             return _abstain(
                 "la 3e rangee d'onglet a disparu APRES le split",
