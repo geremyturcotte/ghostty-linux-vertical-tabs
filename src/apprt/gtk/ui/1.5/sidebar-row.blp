@@ -1,0 +1,144 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $GhosttySidebarRow: Adw.Bin {
+  Gtk.Box {
+    orientation: vertical;
+
+    Gtk.Box {
+      orientation: horizontal;
+      spacing: 8;
+      // Breathing room. Without it the two labels collide and the list reads
+      // as a wall of text rather than a set of distinct tabs.
+      margin-top: 8;
+      margin-bottom: 8;
+      margin-start: 6;
+      margin-end: 6;
+      tooltip-text: bind template.page as <Adw.TabPage>.tooltip;
+
+      Gtk.Image colour_dot {
+        icon-name: "media-record-symbolic";
+        pixel-size: 8;
+        valign: center;
+        visible: false;
+      }
+
+      Gtk.Box {
+        orientation: vertical;
+        spacing: 2;
+        hexpand: true;
+        valign: center;
+
+        Gtk.Label {
+          ellipsize: end;
+          halign: start;
+          single-line-mode: true;
+          label: bind template.page as <Adw.TabPage>.title;
+        }
+
+        Gtk.Label {
+          ellipsize: start;
+          halign: start;
+          single-line-mode: true;
+          label: bind $computed_cwd(template.page as <Adw.TabPage>.child as <$GhosttyTab>.active-surface as <$GhosttySurface>.pwd) as <string>;
+
+          styles [
+            "caption",
+            "dim-label",
+          ]
+        }
+      }
+
+      Gtk.Image {
+        icon-name: "radio-symbolic";
+        visible: bind template.page as <Adw.TabPage>.needs-attention;
+      }
+
+      Gtk.GestureClick {
+        button: 3;
+        pressed => $right_click();
+      }
+
+      Gtk.DragSource drag_source {
+        actions: move;
+        prepare => $drag_prepare();
+      }
+
+      Gtk.DropTarget drop_target {
+        actions: move;
+        drop => $row_drop();
+      }
+
+      Gtk.PopoverMenu menu {
+        menu-model: row_menu;
+        has-arrow: false;
+        halign: start;
+      }
+
+      Gtk.Button {
+        icon-name: "window-close-symbolic";
+        tooltip-text: _("Close Tab");
+        valign: center;
+        clicked => $close_clicked();
+        // Never in the terminal's focus chain.
+        can-focus: false;
+        focus-on-click: false;
+
+        styles [
+          "flat",
+          "circular",
+        ]
+      }
+    }
+
+    // Second-level pane rows for a split tab, populated and kept live from
+    // Zig off SplitTree's `changed` signal (ADR: sidebar knows nothing else
+    // about Ghostty, so it reacts to the signal rather than probing state).
+    // Empty for an unsplit tab, so it contributes no height and the tab's
+    // row stays pixel-identical to before this existed.
+    Gtk.Box panes_box {
+      orientation: vertical;
+    }
+  }
+}
+
+menu row_menu {
+  item {
+    label: _("Change Tab Title…");
+    action: "row.rename";
+  }
+
+  submenu {
+    label: _("Colour");
+
+    item {
+      label: _("None");
+      action: "row.colour-none";
+    }
+
+    item {
+      label: _("Blue");
+      action: "row.colour-accent";
+    }
+
+    item {
+      label: _("Green");
+      action: "row.colour-success";
+    }
+
+    item {
+      label: _("Orange");
+      action: "row.colour-warning";
+    }
+
+    item {
+      label: _("Red");
+      action: "row.colour-error";
+    }
+  }
+
+  item {
+    label: _("Close Tab");
+    action: "row.close";
+  }
+}

@@ -1,0 +1,214 @@
+on:
+  # v*-* matches our suffixed tags (v1.3.1-sidebar.1). Upstream's own
+  # release-tag.yml only matches v[0-9]+.[0-9]+.[0-9]+, which EXCLUDES any
+  # tag with a suffix — measured cause of v1.3.1-sidebar.1 shipping with 0
+  # assets: the workflow that was supposed to build it never triggered.
+  push:
+    tags:
+      - "v*-*"
+  # No inputs: dispatch directly on the tag ref (gh workflow run
+  # fork-release.yml --ref <tag>) so github.ref_name is the tag being
+  # released, same as the push path.
+  workflow_dispatch: {}
+
+name: Fork Release
+
+# Fork-only, additive workflow. Never touches release-tag.yml,
+# release-tip.yml, flatpak.yml, nix.yml, or snap.yml — those stay verbatim
+# upstream so a rebase never conflicts on them. Uses none of the upstream
+# release secrets (MINISIGN, CACHIX, Apple, SENTRY, R2): this only needs
+# GITHUB_TOKEN, which every run gets for free.
+permissions:
+  contents: write
+
+# A cancelled release run corrupts the artifacts already uploaded to the
+# GitHub Release, so unlike fork-ci this never cancels an in-flight run.
+concurrency:
+  group: fork-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-attach:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- setup steps copied verbatim from fork-ci.yml (PR #7, proven green ~11min) ---
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1
+
+      # Build-only tools: libwayland-bin for wayland-scanner (needed to
+      # compile gtk4-layer-shell from source below) and patchelf (needed to
+      # fix up the release binary's RPATH after packaging). Neither ships
+      # in the release archive and neither is required at runtime — the
+      # guard step below installs only the four packages above, matching
+      # what a user who has never touched Ghostty would actually have.
+      - name: Install build-only tools (wayland-scanner, patchelf)
+        run: |
+          sudo apt-get install -y libwayland-bin patchelf
+
+      - name: Install Zig 0.15.2
+        run: |
+          mkdir -p "$HOME/.local/bin" "$HOME/.local/opt"
+          cd /tmp
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar xf zig.tar.xz
+          mv zig-x86_64-linux-0.15.2 "$HOME/.local/opt/zig-0.15.2"
+          ln -sf "$HOME/.local/opt/zig-0.15.2/zig" "$HOME/.local/bin/zig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install meson + ninja (isolated venv — PEP 668)
+        run: |
+          python3 -m venv "$HOME/.local/opt/build-venv"
+          "$HOME/.local/opt/build-venv/bin/pip" install --upgrade pip meson ninja
+          ln -sf "$HOME/.local/opt/build-venv/bin/meson" "$HOME/.local/bin/meson"
+          ln -sf "$HOME/.local/opt/build-venv/bin/ninja" "$HOME/.local/bin/ninja"
+
+      - name: Build blueprint-compiler 0.22.2 from source (apt ships 0.12.0 — too old)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /tmp
+          git clone --depth 1 --branch v0.22.2 https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+          cd blueprint-compiler
+          meson setup _build --prefix="$HOME/.local"
+          ninja -C _build install
+          mkdir -p "$(python3 -m site --user-site)"
+          echo "$HOME/.local/lib/python3/dist-packages" > "$(python3 -m site --user-site)/blueprintcompiler.pth"
+
+      # --- release build + packaging ---
+
+      # b.systemIntegrationOption("gtk4-layer-shell", .{}) defaults to
+      # enabled (measured via `zig build --help`), which is what made the
+      # earlier version of this workflow link against a .so extracted from
+      # a third-party .deb — present on the runner, absent on a user's
+      # machine, so the shipped binary failed to start (measured:
+      # `ldd` reported "libgtk4-layer-shell.so => not found" for anyone
+      # who didn't already have upstream Ghostty installed).
+      # -fno-sys=gtk4-layer-shell forces src/build/SharedDeps.zig down its
+      # `else` branch: it fetches gtk4-layer-shell's own upstream source
+      # (pinned tarball in build.zig.zon, the same mechanism already used
+      # for wayland-protocols), compiles it, and both installs the
+      # resulting .so into -p out/lib AND dynamically links ghostty
+      # against it — so the library we ship is one we built from source,
+      # not one pulled out of someone else's package.
+      - name: zig build -fno-sys=gtk4-layer-shell -Doptimize=ReleaseFast -p out
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          zig build -fno-sys=gtk4-layer-shell -Doptimize=ReleaseFast --search-prefix "$HOME/.local" -p out
+
+      - name: Package tarball + checksum
+        id: package
+        run: |
+          tag="${{ github.ref_name }}"
+          name="ghostty-${tag}-linux-x86_64"
+          mkdir -p "dist/${name}"
+          cp -a out/. "dist/${name}/"
+
+          # The freshly built binary's RUNPATH points at the zig-cache
+          # directory it was linked against (a build-machine-only path —
+          # measured via readelf) plus the runner's own $HOME. Neither
+          # exists on a machine that only unpacked the tarball. Chosen fix:
+          # patchelf the RPATH to $ORIGIN/../lib, since lib/ ships
+          # colocated with bin/ in this same archive — a simple relative
+          # path beats a wrapper launcher script here because there's
+          # nothing else for a launcher to do (no env vars to set, no
+          # relocation logic), and it keeps `ghostty` directly executable.
+          patchelf --set-rpath '$ORIGIN/../lib' "dist/${name}/bin/ghostty"
+
+          # Ship the license of the library we just compiled and are now
+          # redistributing as a binary .so.
+          gls_src="$(dirname "$(dirname "$(find "$HOME/.cache/zig/p" -maxdepth 3 -name gtk4-layer-shell.c | head -1)")")"
+          mkdir -p "dist/${name}/licenses/gtk4-layer-shell"
+          cp "${gls_src}/LICENSE" "dist/${name}/licenses/gtk4-layer-shell/LICENSE"
+
+          tar -czf "${name}.tar.gz" -C dist "${name}"
+          sha256sum "${name}.tar.gz" > SHA256SUMS
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      # Non-negotiable guard: replays the exact failure mode measured
+      # against the previous version of this workflow (a "not found" `.so`
+      # invisible to CI because the runner happened to have it). Extracts
+      # the actual packaged tarball into a clean ubuntu:24.04 container
+      # with ONLY the four runtime-shaped apt packages from "Install system
+      # dependencies" above — no build-only tools, no upstream ghostty, no
+      # host state the runner accumulated during this job — and fails the
+      # run if `ldd` reports any missing shared library. This must stay a
+      # workflow step, not a local check: a local check catches today's
+      # regression but not the next one.
+      # ldd only proves the dynamic linker can resolve every DT_NEEDED
+      # entry — it says nothing about whether the program actually runs
+      # (a missing GSettings schema, an unresolvable resource, a crash on
+      # the first GTK call would all sail through an ldd-only check). So
+      # this also execs the real binary, headless, and requires exit 0.
+      # Deliberately limited to --version/--help: neither needs a display
+      # or D-Bus session (verified locally, including inside this same
+      # bare ubuntu:24.04 + four-package container), so this proves the
+      # binary starts and its GTK/libadwaita init path completes without
+      # requiring us to fake a compositor here. It does not prove the
+      # terminal itself renders or accepts input — that's out of scope
+      # for a headless CI guard.
+      - name: Guard — verify the shipped binary runs on a clean system
+        run: |
+          name="${{ steps.package.outputs.name }}"
+          docker run --rm -v "$PWD/${name}.tar.gz:/artifact.tar.gz:ro" ubuntu:24.04 bash -euc '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1 >/dev/null
+            mkdir /extract
+            tar -xzf /artifact.tar.gz -C /extract
+            bin="$(find /extract -maxdepth 3 -type f -path "*/bin/ghostty")"
+            echo "checking: $bin"
+            missing="$(ldd "$bin" | grep "not found" || true)"
+            if [ -n "$missing" ]; then
+              echo "MISSING SHARED LIBRARIES — this artifact will not start on a clean system:"
+              echo "$missing"
+              exit 1
+            fi
+            echo "OK — no missing shared libraries"
+            echo "--- smoke test: --version ---"
+            "$bin" --version
+            echo "--- smoke test: --help ---"
+            "$bin" --help >/dev/null
+            echo "OK — binary starts and exits 0 on --version and --help"
+          '
+
+      # Only a tag may touch a release. github.ref_name is the TAG on a tag
+      # push and the BRANCH on a workflow_dispatch, and the step below feeds it
+      # straight to `gh release create`. Without this guard, clicking "Run
+      # workflow" from `sidebar` publishes a prerelease literally named
+      # `sidebar` -- measured by reading the file, not by trying it, because
+      # trying it is the damage.
+      #
+      # Guarding the two release steps rather than the whole job is deliberate:
+      # a manual dispatch stays useful for exercising the expensive half --
+      # the build and the clean-container smoke test -- with no way to reach a
+      # release.
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          name="${{ steps.package.outputs.name }}"
+          gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create "$tag" --repo "${{ github.repository }}" \
+                 --title "$tag" --notes "Fork release build for $tag." --prerelease
+          gh release upload "$tag" "${name}.tar.gz" SHA256SUMS \
+            --repo "${{ github.repository }}" --clobber
+
+      # Printed into the run's own log, not just the release page — this
+      # stays readable via `gh run view --log` even after the release and
+      # tag are deleted (e.g. after a disposable test-tag run), so cleanup
+      # never destroys the only record of what was actually attached.
+      - name: Report attached assets (survives post-run cleanup)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          echo "Assets attached to release $tag:"
+          gh release view "$tag" --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'

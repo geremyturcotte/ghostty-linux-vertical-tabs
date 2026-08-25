@@ -3581,6 +3581,20 @@ else
 /// with keybinds.
 @"gtk-tabs-location": GtkTabsLocation = .top,
 
+/// Show tabs in a vertical sidebar instead of a horizontal tab bar.
+///
+/// Valid values are:
+///
+///  * `none` - No sidebar. Ghostty behaves exactly as upstream.
+///  * `left` - Sidebar on the left of the terminal area.
+///  * `right` - Sidebar on the right of the terminal area.
+///
+/// While the sidebar is shown the horizontal tab bar is hidden, regardless
+/// of `window-show-tab-bar`. The two are alternatives, never both at once.
+///
+/// Requires libadwaita 1.4 or newer. On older versions this has no effect.
+@"gtk-sidebar-tabs": GtkSidebarTabs = .left,
+
 /// If this is `true`, the titlebar will be hidden when the window is maximized,
 /// and shown when the titlebar is unmaximized. GTK only.
 ///
@@ -8987,6 +9001,13 @@ pub const GtkTabsLocation = enum {
     bottom,
 };
 
+/// See gtk-sidebar-tabs
+pub const GtkSidebarTabs = enum {
+    none,
+    left,
+    right,
+};
+
 /// See gtk-toolbar-style
 pub const GtkToolbarStyle = enum {
     flat,
@@ -10850,6 +10871,49 @@ test "compatibility: window new-window" {
         try testing.expectEqual(
             MacOSDockDropBehavior.@"new-window",
             cfg.@"macos-dock-drop-behavior",
+        );
+    }
+}
+
+test "gtk-sidebar-tabs" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Default is `left`: the sidebar is the reason this fork exists.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try testing.expectEqual(
+            GtkSidebarTabs.left,
+            cfg.@"gtk-sidebar-tabs",
+        );
+    }
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--gtk-sidebar-tabs=right",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try testing.expectEqual(
+            GtkSidebarTabs.right,
+            cfg.@"gtk-sidebar-tabs",
+        );
+    }
+
+    // `none` is the escape hatch: it must stay reachable, because it is
+    // what makes this fork byte-identical to upstream on demand.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--gtk-sidebar-tabs=none",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try testing.expectEqual(
+            GtkSidebarTabs.none,
+            cfg.@"gtk-sidebar-tabs",
         );
     }
 }

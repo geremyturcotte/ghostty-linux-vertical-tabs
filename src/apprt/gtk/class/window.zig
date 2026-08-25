@@ -26,6 +26,7 @@ const CloseConfirmationDialog = @import("close_confirmation_dialog.zig").CloseCo
 const SplitTree = @import("split_tree.zig").SplitTree;
 const Surface = @import("surface.zig").Surface;
 const Tab = @import("tab.zig").Tab;
+const Sidebar = @import("sidebar.zig").Sidebar;
 const DebugWarning = @import("debug_warning.zig").DebugWarning;
 const CommandPalette = @import("command_palette.zig").CommandPalette;
 const WeakRef = @import("../weak_ref.zig").WeakRef;
@@ -263,6 +264,17 @@ pub const Window = extern struct {
         toolbar: *adw.ToolbarView,
         toast_overlay: *adw.ToastOverlay,
 
+        /// The collapsible split holding the vertical tab sidebar, and the
+        /// sidebar itself. Both are inert while gtk-sidebar-tabs is `none`.
+        split_view: *adw.OverlaySplitView,
+
+        /// Whether the adaptive breakpoint has been installed. It is added
+        /// lazily, the first time the sidebar is enabled, so that
+        /// gtk-sidebar-tabs = none leaves the window exactly as upstream
+        /// builds it.
+        breakpoint_added: bool = false,
+        sidebar: *Sidebar,
+
         pub var offset: c_int = 0;
     };
 
@@ -318,6 +330,17 @@ pub const Window = extern struct {
         priv.tab_bindings = gobject.BindingGroup.new();
         priv.tab_bindings.bind("title", self.as(gobject.Object), "title", .{});
 
+        // The sidebar mirrors the tab view. It borrows it; it never owns it.
+        priv.sidebar.setTabView(priv.tab_view);
+
+        _ = gobject.Object.signals.notify.connect(
+            priv.split_view,
+            *Self,
+            notifyShowSidebar,
+            self,
+            .{ .detail = "show-sidebar" },
+        );
+
         // Set our window icon. We can't set this in the blueprint file
         // because its dependent on the build config.
         self.as(gtk.Window).setIconName(build_config.bundle_id);
@@ -352,6 +375,8 @@ pub const Window = extern struct {
     fn initActionMap(self: *Self) void {
         const s_variant_type = glib.ext.VariantType.newFor([:0]const u8);
         defer s_variant_type.free();
+        const u_variant_type = glib.ext.VariantType.newFor(u32);
+        defer u_variant_type.free();
 
         const actions = [_]ext.actions.Action(Self){
             .init("about", actionAbout, null),
@@ -362,6 +387,9 @@ pub const Window = extern struct {
             .init("prompt-surface-title", actionPromptSurfaceTitle, null),
             .init("prompt-tab-title", actionPromptTabTitle, null),
             .init("prompt-context-tab-title", actionPromptContextTabTitle, null),
+            .init("close-tab-at", actionCloseTabAt, u_variant_type),
+            .init("toggle-sidebar", actionToggleSidebar, null),
+            .init("focus-sidebar", actionFocusSidebar, null),
             .init("ring-bell", actionRingBell, null),
             .init("split-right", actionSplitRight, null),
             .init("split-left", actionSplitLeft, null),
@@ -618,6 +646,61 @@ pub const Window = extern struct {
     /// to call multiple times. This should be called whenever a change
     /// happens that might affect how the window appears (config change,
     /// fullscreen, etc.).
+    /// Show or hide the vertical tab sidebar.
+    ///
+    /// The sidebar and the horizontal tab bar are alternatives, never both at
+    /// once. `none` must leave upstream behaviour untouched — it is the escape
+    /// hatch this fork promises, and the first thing to check on a regression.
+    fn breakpointApply(_: *adw.Breakpoint, self: *Self) callconv(.c) void {
+        self.private().split_view.setCollapsed(1);
+    }
+
+    fn breakpointUnapply(_: *adw.Breakpoint, self: *Self) callconv(.c) void {
+        self.private().split_view.setCollapsed(0);
+    }
+
+    fn syncSidebar(self: *Self, config: *const configpkg.Config) void {
+        const priv = self.private();
+        const mode = config.@"gtk-sidebar-tabs";
+        const show = mode != .none;
+
+        priv.split_view.setShowSidebar(@intFromBool(show));
+        priv.split_view.setSidebarPosition(switch (mode) {
+            .right => .end,
+            else => .start,
+        });
+
+        if (show) priv.tab_bar.as(gtk.Widget).setVisible(0);
+
+        if (show and !priv.breakpoint_added) {
+            priv.breakpoint_added = true;
+
+            // libadwaita refuses to size a breakpoint against a window with no
+            // minimum, and says so on every launch. Setting it here rather
+            // than in the template keeps that requirement — and its side
+            // effects — off the `none` path entirely.
+            self.as(gtk.Widget).setSizeRequest(360, 240);
+
+            const condition = adw.BreakpointCondition.parse("max-width: 700px");
+            const breakpoint = adw.Breakpoint.new(condition);
+            _ = adw.Breakpoint.signals.apply.connect(
+                breakpoint,
+                *Self,
+                breakpointApply,
+                self,
+                .{},
+            );
+            _ = adw.Breakpoint.signals.unapply.connect(
+                breakpoint,
+                *Self,
+                breakpointUnapply,
+                self,
+                .{},
+            );
+            self.as(adw.ApplicationWindow).addBreakpoint(breakpoint);
+        }
+    }
+
     fn syncAppearance(self: *Self) void {
         const priv = self.private();
         const widget = self.as(gtk.Widget);
@@ -699,6 +782,8 @@ pub const Window = extern struct {
             .top => priv.toolbar.addTopBar(priv.tab_bar.as(gtk.Widget)),
             .bottom => priv.toolbar.addBottomBar(priv.tab_bar.as(gtk.Widget)),
         }
+
+        self.syncSidebar(config);
 
         // Do our window-protocol specific appearance sync.
         priv.winproto.syncAppearance() catch |err| {
@@ -1802,6 +1887,76 @@ pub const Window = extern struct {
         self.as(gtk.Window).close();
     }
 
+    /// Close the tab at a given row index.
+    ///
+    /// Deliberately NOT named `win.close-tab`: that already exists, takes a
+    /// string variant, and parses it into a CloseTabMode (this/other/right)
+    /// acting on the context-menu page. Reusing the name with a uint32 would
+    /// be a signature collision.
+    fn actionCloseTabAt(
+        _: *gio.SimpleAction,
+        param_: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const param = param_ orelse {
+            log.warn("win.close-tab-at called without a parameter", .{});
+            return;
+        };
+        const pos = param.getUint32();
+        const priv = self.private();
+        if (pos >= @as(u32, @intCast(priv.tab_view.getNPages()))) {
+            log.warn("win.close-tab-at out of range pos={d}", .{pos});
+            return;
+        }
+        priv.tab_view.closePage(priv.tab_view.getNthPage(@intCast(pos)));
+    }
+
+    fn actionToggleSidebar(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+
+        // gtk-sidebar-tabs = none must leave upstream behaviour untouched —
+        // the sidebar and its toggle are inert on this path (see syncSidebar).
+        if (priv.config) |v| {
+            if (v.get().@"gtk-sidebar-tabs" == .none) return;
+        }
+
+        const showing = priv.split_view.getShowSidebar() != 0;
+        priv.split_view.setShowSidebar(@intFromBool(!showing));
+    }
+
+    /// Move keyboard focus into the sidebar's tab list. Inert unless the
+    /// sidebar is actually on screen: focusing a hidden list would strand the
+    /// keyboard on an off-screen widget, and it keeps this gesture invisible
+    /// in `gtk-sidebar-tabs = none` and whenever the sidebar is collapsed —
+    /// the same "the sidebar path does nothing when there's no sidebar"
+    /// promise the toggle's own notifyShowSidebar guard exists to keep.
+    fn actionFocusSidebar(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        if (priv.split_view.getShowSidebar() == 0) return;
+        priv.sidebar.focusList();
+    }
+
+    /// Hiding the sidebar must never strand the keyboard on a widget that
+    /// just disappeared. This is the second entrance to the bug the sidebar's
+    /// row-activate handler already guards: focus goes back to the terminal.
+    fn notifyShowSidebar(
+        _: *adw.OverlaySplitView,
+        _: *gobject.ParamSpec,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv = self.private();
+        if (priv.split_view.getShowSidebar() != 0) return;
+        if (self.getActiveSurface()) |surface| surface.grabFocus();
+    }
+
     fn actionCloseTab(
         _: *gio.SimpleAction,
         param_: ?*glib.Variant,
@@ -2057,6 +2212,7 @@ pub const Window = extern struct {
         pub const Instance = Self;
 
         fn init(class: *Class) callconv(.c) void {
+            gobject.ext.ensureType(Sidebar);
             gobject.ext.ensureType(DebugWarning);
             gobject.ext.ensureType(SplitTree);
             gobject.ext.ensureType(Surface);
@@ -2090,6 +2246,8 @@ pub const Window = extern struct {
             class.bindTemplateChildPrivate("tab_view", .{});
             class.bindTemplateChildPrivate("toolbar", .{});
             class.bindTemplateChildPrivate("toast_overlay", .{});
+            class.bindTemplateChildPrivate("split_view", .{});
+            class.bindTemplateChildPrivate("sidebar", .{});
 
             // Template Callbacks
             class.bindTemplateCallback("realize", &windowRealize);

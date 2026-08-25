@@ -1150,6 +1150,43 @@ pub const Application = extern struct {
         self.syncActionAccelerator("split-tree.new-split::right", .{ .new_split = .right });
         self.syncActionAccelerator("split-tree.new-split::up", .{ .new_split = .up });
         self.syncActionAccelerator("split-tree.new-split::down", .{ .new_split = .down });
+
+        // The sidebar toggle has no input.Binding.Action, so it cannot be
+        // reached by a `keybind =` line. Adding one would mean touching
+        // Binding.zig, Surface.zig, apprt/action.zig and command.zig — core
+        // files this fork has every reason not to own. A fixed accelerator
+        // buys the keyboard gesture for one line in one GTK-local file.
+        //
+        // gtk-sidebar-tabs = none must leave upstream behaviour untouched, so
+        // the accelerator is not registered at all on that path — no
+        // shortcut, no effect, matching actionToggleSidebar's own guard.
+        {
+            const config = self.private().config.get();
+            if (config.@"gtk-sidebar-tabs" != .none) {
+                const accels = [_:null]?[*:0]const u8{"<Ctrl><Shift>b"};
+                self.as(gtk.Application).setAccelsForAction("win.toggle-sidebar", &accels);
+            }
+        }
+
+        // Grab keyboard focus into the sidebar's tab list. Same rationale as
+        // the toggle above (no input.Binding.Action, so a GTK-local fixed
+        // accelerator rather than a `keybind =` line that would drag in the
+        // core upstream files this fork won't own). `<Ctrl><Shift>l` — L for
+        // the tab List — is unbound in upstream's default keybinds, so it
+        // collides with nothing; it is registered ONLY when the sidebar can
+        // appear at all. In `gtk-sidebar-tabs = none` no binding is installed,
+        // so the gesture stays invisible and falls through to the terminal
+        // exactly as upstream, rather than being silently swallowed.
+        {
+            const gtk_app = self.as(gtk.Application);
+            if (self.private().config.get().@"gtk-sidebar-tabs" != .none) {
+                const accels = [_:null]?[*:0]const u8{"<Ctrl><Shift>l"};
+                gtk_app.setAccelsForAction("win.focus-sidebar", &accels);
+            } else {
+                const zero = [_:null]?[*:0]const u8{};
+                gtk_app.setAccelsForAction("win.focus-sidebar", &zero);
+            }
+        }
     }
 
     fn syncActionAccelerator(

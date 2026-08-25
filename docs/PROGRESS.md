@@ -1,0 +1,111 @@
+# Progress
+
+Live status of the vertical tab sidebar. Updated as each task lands.
+Plan: [`vertical-tabs-plan.md`](vertical-tabs-plan.md) · Design: [`vertical-tabs-design.md`](vertical-tabs-design.md)
+
+| # | Task | Status |
+|---|---|---|
+| 0 | Toolchain + baseline build | ✅ done |
+| 1 | Symbol-first code citations | ✅ done |
+| 2 | `gtk-sidebar-tabs` config key | ✅ done |
+| 3 | `GhosttySidebar` widget, standalone | ✅ done |
+| 4 | Wire into the window, with focus | ✅ done, verified on screen |
+| 5 | Toggle: action, keybind, header button | ✅ done, verified on screen |
+| 6 | Per-row close button | ✅ done, verified on screen |
+| 7 | Adaptive collapse + acceptance checklist | ✅ done |
+| 8 | README, screenshot, tagged release | ✅ done (screenshot `fe3e13240`; tag in Task 14) |
+| 9 | Right-click menu on rows | ✅ done, verified on screen |
+| 10 | Working-directory subtitle | ✅ done, verified on screen |
+| 11 | Per-tab colour marks | ✅ done, verified on screen |
+| 12 | `none`-parity regression guard | ✅ done |
+| 13 | External code review, applied | ✅ done |
+| 14 | Tagged release `v1.3.1-sidebar.1` | ✅ done |
+
+## What works right now
+
+- `gtk-sidebar-tabs = none | left | right` parses, validates, and shows up in
+  `ghostty +show-config --docs`. Default `left`.
+- The `GhosttySidebar` widget compiles: a `GtkListView` with a Blueprint row
+  template, backed by a `GtkSingleSelection` over the tab view's pages.
+- The sidebar shows on screen, lists the open tabs, and switching works.
+  Confirmed by hand, not inferred from a clean log: clicking a row switches the
+  tab and the keyboard returns to the terminal, and hovering rows does **not**
+  switch anything. Those are the two defects adversarial review predicted before
+  a line was written — both absent in practice.
+
+## Deferred to v1.1
+
+Showing **panes** in the sidebar as a second level under each tab, renameable
+in place. Deliberately out of v1: panes live in `GhosttySplitTree`, not in
+`AdwTabPages`, so it needs a data model of our own rather than a tweak.
+
+Splitting and renaming already work today without any of this —
+`ctrl+shift+o` / `ctrl+shift+e` split, and the `prompt_surface_title` /
+`prompt_tab_title` actions rename a pane or a tab. Those two actions ship with
+**no default keybind**, which is the only thing missing; two lines of config
+fix it.
+
+## Risks the work has settled
+
+| Risk | Verdict |
+|---|---|
+| Can Blueprint cast to a libadwaita type? `bind template.item as <Adw.TabPage>.title` was the first such cast in this repo. | **Resolved.** The generated `sidebar.ui` emits the canonical nested lookup against `AdwTabPage`. |
+| Does Ghostty build on Ubuntu 24.04 at all? | **Resolved.** See the plan's Task 0 for the recipe and its five deviations. |
+
+| Does `action-target: bind template.position` work? | **Refuted.** It compiles and then dies at runtime — GObject has no `guint`-to-`GVariant` transform. Replaced by a row widget that owns its page. |
+| Does a fixed GTK accelerator fire while the terminal holds focus? | **Resolved.** `Ctrl+Shift+B` works; the six-file `Binding.zig` route is not needed. |
+
+Still open: arrow-key behaviour through the sidebar (Task 7's checklist).
+
+## Things that were wrong and got corrected
+
+Recorded because a plan that only shows its successes is not useful to anyone
+reading it later.
+
+- **Zig 0.15.2, not 0.16.0.** The version was read from upstream `main` through
+  the GitHub API while this branch sits on tag v1.3.1. `requireZig()` wants an
+  exact major.minor match, so the newer toolchain was rejected outright.
+- **Spec line numbers were ~200 off**, same root cause: `window.zig` is 2346
+  lines on `main` and 2126 at v1.3.1. Citations now lead with the symbol name.
+- **The first design used `GtkListBox`.** Adversarial review showed
+  `gtk_list_box_bind_model()` ignores `GtkSelectionModel`, so the highlight
+  would have drifted from the active tab on every keyboard switch.
+- **The model was going to be handed over unwrapped.** In `AdwTabPages`,
+  selecting *is* switching — with `single-click-activate`, hovering the sidebar
+  would have switched the live terminal.
+- **`win.close-tab` was already taken**, by a string-variant action parsed into
+  a `CloseTabMode` enum. The new action is `win.close-tab-at`.
+- **Task 3's build gate proved nothing at first.** Zig only compiles reachable
+  code, and nothing imported `sidebar.zig` — a deliberately injected syntax
+  error left the build green. Fixed by making it reachable, then re-verified the
+  same way.
+- **Tagging the release broke the build, for everyone.** Upstream panics when
+  HEAD is on a tag that is not exactly the declared version — a name already
+  taken here by the upstream tag. So the fork's own release tag made
+  `zig build` fail on the branch too, and the first release was published
+  unbuildable. Found by running `zig build --help` on the tagged tree, minutes
+  after publishing. `src/build/Config.zig` now accepts a fork suffix.
+- **An external review found a use-after-free, and was unanimously wrong about
+  a leak.** Three models reviewed the widgets before tagging. `notify::selected-page`
+  was connected on the tab view and never disconnected — a real use-after-free
+  on window teardown, fixed. All three also said the working-directory closure
+  leaked; the fix made the binary abort with `munmap_chunk(): invalid pointer`
+  in every mode, proving something does free that string and the original code
+  was right. Reverted.
+- **The parity guard passed while the binary was crashing.** It only grepped
+  logs and swallowed exit status with `|| true`. It now checks exit codes and
+  was verified against a stub that dies on SIGABRT. A guard blind to a crash is
+  worse than none, because it is believed.
+- **`AdwBreakpoint` needs a window minimum size, and that broke `none` too.**
+  Declared in the template, it warned on every launch — including with the
+  sidebar off. Second break of the same promise, found the same way: a human
+  reading a log. The breakpoint is now installed from Zig only when the sidebar
+  is enabled, and `scripts/check-none-parity.sh` turns the promise into a test.
+- **`GtkSingleSelection` autoselects by default, and that broke `none`.** On an
+  empty model it forces a selection of item 0, which reaches through
+  `AdwTabPages` into `adw_tab_view_get_nth_page(0)` on a tab view with no pages
+  and trips an Adwaita assertion at window construction. It fired even with
+  `gtk-sidebar-tabs = none`, breaking this fork's central promise. Neither
+  `zig build` nor `zig build test` nor four rounds of design review caught it —
+  only launching the binary did. Measured three ways (upstream 0, `none` 1,
+  `left` 1), fixed with `autoselect: false`, re-measured at 0 across all three.

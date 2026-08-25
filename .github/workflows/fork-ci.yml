@@ -1,0 +1,160 @@
+on:
+  # push is restricted to the trunks, not every branch: a branch under a PR
+  # already gets push+pull_request events on the same commit, which land in
+  # the same concurrency group — cancel-in-progress kills whichever started
+  # second AFTER it starts, and GitHub reports that as a `fail`, not a
+  # no-op. Measured: PR #7 showed one `pass` and one `fail` for the same
+  # commit, purely from this race, with a fully green build underneath.
+  # Restricting push here means the duplicate never starts, so main/sidebar
+  # still get push coverage for commits that land without a PR.
+  # `sidebar` is deliberately NOT here while PR #6 is open, and this is the
+  # second half of a fix whose first half is the comment above.
+  #
+  # Restricting push to the trunks was supposed to stop the duplicate. It does
+  # -- for every branch except the one that is BOTH a trunk and the head of an
+  # open PR. `sidebar` is exactly that. Measured on a859a98d8e:
+  #
+  #   pull_request run 32773714399 -> success
+  #   push        run 32773711466 -> CANCELLED
+  #
+  # Same commit, same concurrency group (head_ref and ref_name are both
+  # `sidebar`), cancel-in-progress kills whichever started first.
+  #
+  # That cancelled was harmless until a branch protection was added on `main`
+  # requiring build-test-parity. The protection reads the check, sees
+  # CANCELLED, and refuses the merge: PR #6 went from CLEAN to BLOCKED without
+  # anything about the code changing. Two things that were each fine alone
+  # became blocking together.
+  #
+  # `main` keeps its push coverage. `sidebar` loses nothing: while #6 is open
+  # every commit on it already gets a pull_request run, which is the one that
+  # survives the race and the one the protection reads.
+  push:
+    branches: [main]
+  pull_request: {}
+  workflow_dispatch: {}
+
+name: Fork CI
+
+# Fork-only, additive workflow. Upstream's own Test workflow (test.yml) gates
+# its jobs on `github.repository == 'ghostty-org/ghostty'` and runs on
+# namespace-profile-* (upstream's paid fleet, unreachable from a fork — measured,
+# not guessed). This workflow exists because that means the fork gets ZERO real
+# CI: every push here shows green checks that never actually ran anything.
+#
+# Runs on ubuntu-latest only. Never touches test.yml, nix.yml, flatpak.yml, or
+# update-colorschemes.yml — this file is the only surface a rebase can conflict
+# on, and it conflicts on nothing because nothing upstream references it.
+# github.ref is refs/heads/<branch> on push but refs/pull/<n>/merge on
+# pull_request — two different groups for the same commit, so push and
+# pull_request runs never dedupe against each other. head_ref (PR source
+# branch, short name) falling back to ref_name (push, ALSO the short name —
+# not ref, which is the long refs/heads/<branch> form and still wouldn't
+# match head_ref) puts both events in the same group. Measured: without
+# this, every commit ran the full ~10min build twice in parallel; the first
+# version of this fix (head_ref || ref) only fixed it for pull_request and
+# was verified wrong on push.
+concurrency:
+  group: fork-ci-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Task 0 recipe (docs/vertical-tabs-plan.md), unmodified ---
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gettext pkg-config libgtk-4-dev libadwaita-1-dev gir1.2-adw-1 xvfb \
+                                  python3-xlib python3-pil
+
+      - name: Install Zig 0.15.2
+        run: |
+          mkdir -p "$HOME/.local/bin" "$HOME/.local/opt"
+          cd /tmp
+          curl -fsSL -o zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar xf zig.tar.xz
+          mv zig-x86_64-linux-0.15.2 "$HOME/.local/opt/zig-0.15.2"
+          ln -sf "$HOME/.local/opt/zig-0.15.2/zig" "$HOME/.local/bin/zig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install meson + ninja (isolated venv — PEP 668)
+        run: |
+          python3 -m venv "$HOME/.local/opt/build-venv"
+          "$HOME/.local/opt/build-venv/bin/pip" install --upgrade pip meson ninja
+          ln -sf "$HOME/.local/opt/build-venv/bin/meson" "$HOME/.local/bin/meson"
+          ln -sf "$HOME/.local/opt/build-venv/bin/ninja" "$HOME/.local/bin/ninja"
+
+      - name: Build blueprint-compiler 0.22.2 from source (apt ships 0.12.0 — too old)
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          cd /tmp
+          git clone --depth 1 --branch v0.22.2 https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+          cd blueprint-compiler
+          meson setup _build --prefix="$HOME/.local"
+          ninja -C _build install
+          mkdir -p "$(python3 -m site --user-site)"
+          echo "$HOME/.local/lib/python3/dist-packages" > "$(python3 -m site --user-site)/blueprintcompiler.pth"
+
+      # Installed here, not just before the parity check: measured on
+      # ubuntu-latest, /usr/lib/libgtk4-layer-shell.so is NOT a stock file —
+      # docs/vertical-tabs-plan.md's "orphaned .so, no package owns it" was
+      # observed on a dev box that already had this same upstream .deb
+      # installed. dpkg -S shows the .so is shipped BY the ghostty package
+      # itself. The fork's own build needs it before `zig build` can link.
+      - name: Install upstream ghostty 1.3.1 (parity baseline + gtk4-layer-shell.so)
+        run: |
+          curl -fsSL -o /tmp/ghostty-upstream.deb \
+            https://github.com/mkasberg/ghostty-ubuntu/releases/download/1.3.1-0-ppa2/ghostty_1.3.1-0.ppa2_amd64_24.04.deb
+          sudo apt-get install -y /tmp/ghostty-upstream.deb
+
+      - name: Link gtk4-layer-shell (zig looks for -0.so, the .deb ships it unsuffixed)
+        run: |
+          mkdir -p "$HOME/.local/lib"
+          ln -sf /usr/lib/libgtk4-layer-shell.so "$HOME/.local/lib/libgtk4-layer-shell-0.so"
+
+      - name: zig build
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          zig build --search-prefix "$HOME/.local"
+
+      - name: zig build test
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          zig build test --search-prefix "$HOME/.local"
+
+      # --- parity gate: scripts/check-none-parity.sh, never called until now ---
+
+      - name: check-none-parity.sh
+        run: xvfb-run --auto-servernum -- sh scripts/check-none-parity.sh /usr/bin/ghostty
+
+      # --- interface gate: what check-none-parity.sh structurally CANNOT see ---
+      #
+      # The step above compares LOGS. It returned SUCCESS on a commit where
+      # Ctrl+Shift+B summoned a full sidebar in `gtk-sidebar-tabs=none` --
+      # measured, 2026-08-24, run 32741694702. A log comparison cannot see an
+      # interface defect, so its green proves the fork builds and its tests
+      # pass; it proves NOTHING about `none` parity. That is the most
+      # dangerous of the three states: a reader takes it for an answer.
+      #
+      # This step is the missing measurement, and it is narrow on purpose: it
+      # only answers "is the sidebar really absent when it is disabled?".
+      # Method, with a positive control in the SAME run: press Ctrl+Shift+B in
+      # `left` mode (must change the sidebar column -- else the run refuses to
+      # conclude), then the identical gesture in `none` mode (must change
+      # nothing). The column width is MEASURED from the image, never assumed:
+      # the frozen 260 was read off a window-managed 922x722 window, while
+      # xvfb here gives 800x600 whose sidebar is 202px -- 58px of terminal
+      # would otherwise be counted as sidebar.
+      #
+      # Proven to discriminate, same harness and display, one variable:
+      #   binary before the fix -> exit 1, none-column diff 0.82780
+      #   binary with the fix   -> exit 0, none-column diff 0.00000
+      #   positive control identical in both: column measured x=202, 0.89281
+      - name: none is really inert (interface, not logs)
+        run: xvfb-run --auto-servernum -- python3 scripts/acceptance-harness.py --none-shortcut

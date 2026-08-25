@@ -51,6 +51,17 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         };
 
         [start]
+        Gtk.ToggleButton {
+          icon-name: "sidebar-show-symbolic";
+          tooltip-text: _("Toggle Tab Sidebar");
+          active: bind split_view.show-sidebar bidirectional;
+          // Kept out of the terminal's focus chain, like its neighbours: a
+          // titlebar button must never hold the keyboard.
+          can-focus: false;
+          focus-on-click: false;
+        }
+
+        [start]
         Adw.SplitButton {
           clicked => $new_tab();
           icon-name: "tab-new-symbolic";
@@ -147,29 +158,37 @@ template $GhosttyWindow: Adw.ApplicationWindow {
         }
       }
 
-      Box {
-        orientation: vertical;
+      Adw.OverlaySplitView split_view {
+        show-sidebar: false;
+        sidebar-position: start;
 
-        $GhosttyDebugWarning {
-          visible: bind template.debug;
-        }
+        sidebar: $GhosttySidebar sidebar {};
 
-        Adw.ToastOverlay toast_overlay {
-          Adw.TabView tab_view {
-            notify::n-pages => $notify_n_pages();
-            notify::selected-page => $notify_selected_page();
-            close-page => $close_page();
-            page-attached => $page_attached();
-            page-detached => $page_detached();
-            create-window => $tab_create_window();
-            setup-menu => $setup_tab_menu();
-            menu-model: tab_context_menu;
-            shortcuts: none;
+        content: Box {
+          orientation: vertical;
+
+          $GhosttyDebugWarning {
+            visible: bind template.debug;
           }
-        }
+
+          Adw.ToastOverlay toast_overlay {
+            Adw.TabView tab_view {
+              notify::n-pages => $notify_n_pages();
+              notify::selected-page => $notify_selected_page();
+              close-page => $close_page();
+              page-attached => $page_attached();
+              page-detached => $page_detached();
+              create-window => $tab_create_window();
+              setup-menu => $setup_tab_menu();
+              menu-model: tab_context_menu;
+              shortcuts: none;
+            }
+          }
+        };
       }
     }
   };
+
 }
 
 menu split_menu {

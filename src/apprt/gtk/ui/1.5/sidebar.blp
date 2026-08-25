@@ -1,0 +1,48 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $GhosttySidebar: Adw.Bin {
+  Gtk.ScrolledWindow {
+    hscrollbar-policy: never;
+    vexpand: true;
+
+    Gtk.ListView view {
+      show-separators: false;
+      single-click-activate: true;
+      activate => $row_activated();
+
+      // The sidebar's keyboard grammar. Capture phase so Enter/Space/Escape
+      // are read before GtkListView's own bindings: Enter/Space must mean
+      // "activate this tab" (and hand focus back to the terminal), Escape must
+      // return focus to the terminal. Up/Down are deliberately NOT handled
+      // here — they fall through to the list's native cursor movement, which
+      // for a single selection moves the highlight.
+      EventControllerKey {
+        propagation-phase: capture;
+        key-pressed => $view_key_pressed();
+      }
+
+      // autoselect must be off. It defaults on, and on an EMPTY model it
+      // forces a selection of item 0 — which reaches through AdwTabPages into
+      // adw_tab_view_get_nth_page(0) on a tab view with no pages yet, and
+      // trips an Adwaita assertion at window construction. The sidebar's
+      // highlight follows AdwTabView; it never forces a selection of its own.
+      model: Gtk.SingleSelection model {
+        autoselect: false;
+        can-unselect: true;
+      };
+
+      styles [
+        "navigation-sidebar",
+      ]
+
+      factory: Gtk.BuilderListItemFactory {
+        template Gtk.ListItem {
+          child: $GhosttySidebarRow {
+            page: bind template.item as <Adw.TabPage>;
+          };
+        }
+      };
+    }
+  }
+}
