@@ -515,7 +515,9 @@ def cmd_scroll_colour():
     try:
         s.open_tabs(5)  # 6 total with the initial tab
 
-        geom = s.measure_row_geometry()
+        band = _scan_close_btn_band(s)
+        log(f"task11: close-button band SCANNED at x={band} (window {s.ww}x{s.wh})")
+        geom = s.measure_row_geometry(close_btn_x=band)
         if geom["step_y"] is None:
             raise RuntimeError("cmd_scroll_colour: could not measure row spacing "
                                 "(fewer than 2 rows detected with 6 tabs open)")
