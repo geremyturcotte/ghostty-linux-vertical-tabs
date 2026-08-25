@@ -428,6 +428,7 @@ class Session:
                 gap += 1
 
         centers = [(g0 + g1) / 2 for g0, g1 in groups]
+        heights = [g1 - g0 + 1 for g0, g1 in groups]
         if not centers:
             raise RuntimeError("measure_row_geometry: no sidebar rows detected -- "
                                 "is the sidebar visible and at least one tab open?")
@@ -437,8 +438,8 @@ class Session:
             diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
             step_y = diffs[len(diffs) // 2]  # median
 
-        log(f"measure_row_geometry: centers={centers} step_y={step_y}")
-        return {"row1_y": centers[0], "step_y": step_y, "centers": centers}
+        log(f"measure_row_geometry: centers={centers} step_y={step_y} heights={heights}")
+        return {"row1_y": centers[0], "step_y": step_y, "centers": centers, "heights": heights}
 
     def close(self):
         try:
@@ -1004,18 +1005,38 @@ def cmd_panes():
             xtest.fake_input(d, X.KeyRelease, kc)
         d.sync()
 
-    log("mode --panes : NON DEMONTRABLE sur les affichages disponibles a ce jour.")
-    log("  bare X (xvfb/Xephyr, 800x600) : la 3e rangee disparait apres le split.")
-    log("  :0 avec un WM                 : les frappes n'atteignent pas le client")
-    log("                                  tant qu'une autre application tient le focus.")
     log(f"  Un echec ici sort en code {CANNOT_MEASURE} (ABSTENTION), jamais en FAIL nu.")
     s = Session()
     try:
+        # A bare X server (Xephyr/xvfb) hands out an 800x600 window, and at
+        # that size the 3rd tab row is pushed out of the window entirely
+        # once the split adds pane sub-rows -- measured: geom1's centers
+        # drop below 3, and the run abstains instead of measuring anything.
+        # Resizing to the reference window up front (the same pattern
+        # cmd_drag_reorder already uses) gives the split room to grow into,
+        # same as the ~922x722 a real window manager hands out.
+        s.win.configure(width=922, height=722)
+        s.d.sync()
+        time.sleep(1.0)
+        g = s.win.get_geometry()
+        s.ww, s.wh = g.width, g.height
+        log(f"panes: resized to reference window {s.ww}x{s.wh}")
+
         s.open_tabs(2)  # 3 total; rank 3 (index 2) is focused
         band = _scan_close_btn_band(s)
         log(f"panes: close-button band SCANNED at x={band} "
             f"(window {s.ww}x{s.wh}) -- not the frozen (216, 234)")
-        geom0 = s.measure_row_geometry(close_btn_x=band)
+        # y_scan's own default (60, None) starts inside the Debug build's
+        # "Vous utilisez une version de debogage" banner, which is bright
+        # enough in this same x-band to register as a 4th, narrower "row"
+        # above the 3 real ones -- measured: centers=[94.5, 131.5, 187.5,
+        # 243.5] on a 922x722 window, where the last 3 are evenly spaced
+        # (56px apart, the real rows) and the first is not (37px to the
+        # next). Starting the scan at y=105 -- below every measured banner
+        # pixel (up to y=98), above the first real row's close button
+        # (from y=127) -- drops that false row without touching anything
+        # the banner-free reference windows already relied on.
+        geom0 = s.measure_row_geometry(close_btn_x=band, y_scan=(105, None))
         if geom0["step_y"] is None or len(geom0["centers"]) < 3:
             return _abstain(
                 "le detecteur n'a pas trouve les 3 rangees d'onglet AVANT le split",
@@ -1024,8 +1045,10 @@ def cmd_panes():
                 "jamais ete ouverts parce que les frappes n'atteignent pas le client")
         c1, c2, c3 = (round(c) for c in geom0["centers"][:3])
         step0 = geom0["step_y"]
+        row_h0 = sorted(geom0["heights"][:3])[1]  # median of the 3 baseline rows
         spacing_uniform = abs((c2 - c1) - (c3 - c2)) <= 3
-        log(f"panes: baseline rows at y={c1}/{c2}/{c3} step={step0} uniform={spacing_uniform}")
+        log(f"panes: baseline rows at y={c1}/{c2}/{c3} step={step0} "
+            f"heights={geom0['heights']} uniform={spacing_uniform}")
         if not spacing_uniform:
             log("POSITIVE CONTROL FAILED — row spacing isn't uniform before any split; "
                 "refusing to trust deltas measured against it")
@@ -1035,13 +1058,46 @@ def cmd_panes():
         send_combo(s.d, [ctrl_kc_sym, shift_kc_sym], o_kc_sym)  # new_split:right
         time.sleep(1.2)  # idleAdd-debounced tree rebuild + relayout + paint
 
-        geom1 = s.measure_row_geometry(close_btn_x=band)
+        geom1 = s.measure_row_geometry(close_btn_x=band, y_scan=(105, None))
         if len(geom1["centers"]) < 3:
             return _abstain(
                 "la 3e rangee d'onglet a disparu APRES le split",
                 f"centers={geom1['centers']} sur une fenetre {s.ww}x{s.wh} — mesure sur "
                 "bare X : les sous-rangees de pane repoussent la 3e hors de portee du "
                 "detecteur. A rejouer sur une fenetre geree par un WM")
+
+        # geom1 can hold MORE than 3 bands after a split: the pane sub-rows
+        # a split adds sit in the same x-band as a tab row's close button,
+        # and this detector has no way, from the close-button band alone,
+        # to tell "a pane sub-row" from a real tab row. Picking centers[:3]
+        # blindly would silently mix a pane sub-row into the tab-row
+        # triplet and report a wrong gap-grew verdict from it.
+        #
+        # The count alone is enough to catch this, with NO threshold: 3
+        # real tabs open, more than 3 bands detected -> the data is
+        # contaminated, period. A height-based gate was tried first (>2px
+        # off row_h0) and it does not hold: measured 7px sub-rows against a
+        # 10px baseline on one window (gap 3, caught), 9px against 10px on
+        # another (gap 1, missed) -- a threshold derived from a single
+        # measurement and frozen, the exact family of bug this repo has
+        # hit six times now (ROW1, the 260 column, close_btn (216,234), the
+        # hamburger band, _measure_sidebar_column's own split defect, and
+        # this one). Heights are kept in the abstention's DETAIL for the
+        # follow-up, never in the CONDITION.
+        if len(geom1["centers"]) > 3:
+            return _abstain(
+                "measure_row_geometry ne distingue pas une sous-rangee de pane "
+                "d'une rangee d'onglet dans la bande du bouton de fermeture",
+                f"APRES split: centers={geom1['centers']} heights={geom1['heights']} "
+                f"(baseline row height={row_h0}) — {len(geom1['centers'])} bandes "
+                "detectees pour 3 rangees d'onglet reelles connues (ouvertes par ce "
+                "run). Le compte seul suffit : plus de bandes que d'onglets reels veut "
+                "dire des donnees contaminees, quelle que soit la hauteur des bandes en "
+                "trop. Prendre centers[:3] donnerait un verdict gap_grew NON FIABLE "
+                "(bande de pane melangee au triplet) -- NON DIAGNOSTIQUE en l'etat, "
+                "distinct du remede scelle de _measure_sidebar_column. A traiter dans "
+                "un suivi separe.")
+
         n1, n2, n3 = (round(c) for c in geom1["centers"][:3])
         log(f"panes: after split rows at y={n1}/{n2}/{n3}")
 
@@ -1424,7 +1480,31 @@ def _measure_sidebar_column(img):
     then walk leftward while each column is still overwhelmingly that colour.
     Where that stops is the sidebar's right edge. Returns 0 when the terminal
     reaches the left edge -- i.e. there is NO sidebar at all, which is exactly
-    what `gtk-sidebar-tabs=none` must show."""
+    what `gtk-sidebar-tabs=none` must show.
+
+    A split defeats a naive version of this walk: it opens a SECOND terminal
+    pane to the left of the first one, separated by a 1px border. The two
+    panes' backgrounds are not bit-identical -- measured (40,44,53) vs
+    (40,44,52), one unit apart in the blue channel -- and the border between
+    them (69,69,69) is not terminal at all. A walk that requires an exact
+    colour match and never crosses a non-terminal column stops AT THE SPLIT
+    BORDER and reports the split's edge instead of the sidebar's: measured
+    576 (the split boundary) instead of 233 (the sidebar edge) on a
+    3-tabs-plus-split capture. Two changes fix it, and BOTH are required --
+    either alone leaves the walk stuck at the split boundary (measured on the
+    same capture: tolerance alone still 576, border-crossing alone still
+    576, only the combination reaches 233):
+
+    - `is_terminal` tolerates a distance of 1 per channel, so the second
+      pane's background still counts as "terminal" despite not being
+      bit-identical to the first.
+    - the walk may cross exactly ONE non-terminal column and keep going --
+      but only when the column beyond it resumes being terminal, which is
+      what distinguishes a 1px split border (terminal on both sides) from
+      the sidebar's own edge (terminal on one side, sidebar on the other:
+      crossing it would eat into the sidebar itself). Without splits there
+      is no such column to cross, so single-pane windows measure exactly as
+      before."""
     px = img.load()
     w, h = img.width, img.height
     y0, y1 = int(h * 0.55), int(h * 0.95)   # below the tab rows: quiet in both modes
@@ -1438,15 +1518,94 @@ def _measure_sidebar_column(img):
     term_bg = max(counts.items(), key=lambda kv: kv[1])[0]
 
     span = y1 - y0
+    tol = 1
 
     def is_terminal(x):
-        n = sum(1 for y in range(y0, y1) if px[x, y][:3] == term_bg)
+        n = sum(1 for y in range(y0, y1)
+                if all(abs(px[x, y][:3][i] - term_bg[i]) <= tol for i in range(3)))
         return n > 0.9 * span
 
     x = w - 8
-    while x > 0 and is_terminal(x - 1):
-        x -= 1
+    while x > 0:
+        if is_terminal(x - 1):
+            x -= 1
+            continue
+        if x - 2 >= 0 and is_terminal(x - 2):
+            x -= 2  # cross the 1px split border, terminal resumes beyond it
+            continue
+        break
     return x
+
+
+def cmd_sidebar_column_regression():
+    """Applies _measure_sidebar_column to four SELF-GENERATED stand-ins for
+    the majordome's four reference captures and requires the exact ground
+    truth measured off the real screenshots on 2026-08-25, instead of
+    shipping the PNGs themselves into the repo (a test that regenerates its
+    own fixtures is preferable to committing binaries the fork doesn't
+    otherwise need).
+
+    Three are built from the SAME colour profile the majordome read off a
+    real 922x722 window at y=541 (3 tabs + 1 split): sidebar (48,48,48) up
+    to x=232, a 1px separator (31,31,31), left pane (40,44,53) up to x=575,
+    a 1px split border (69,69,69), right pane (40,44,52) to the edge --
+    ground truth 233. The no-split cases place the same sidebar/terminal
+    boundary at x=202 and x=213 (the widths measured on the two real bare-X
+    captures); `none` mode is terminal-only, no sidebar column at all --
+    ground truth ~0.
+
+    THE CONTROL THAT MATTERS is the `none` row: a detector that finds a
+    sidebar-shaped boundary by, say, always stopping at the first
+    non-terminal column it meets would still pass the three sidebar cases
+    and fail this one -- which is exactly how the first attempt at this fix
+    was rejected (3/3 with a sidebar, 795 in `none`)."""
+    from PIL import Image
+
+    def make_column_image(w, h, segments):
+        img = Image.new("RGB", (w, h))
+        px = img.load()
+        for x0, x1, color in segments:
+            for x in range(x0, min(x1, w)):
+                for y in range(h):
+                    px[x, y] = color
+        return img
+
+    SIDEBAR, SEP, LEFT_PANE, SPLIT_SEP, RIGHT_PANE = (
+        (48, 48, 48), (31, 31, 31), (40, 44, 53), (69, 69, 69), (40, 44, 52))
+    TERM = (40, 44, 53)
+
+    cases = [
+        ("panes-big (3 tabs + split)", make_column_image(922, 722, [
+            (0, 232, SIDEBAR), (232, 233, SEP),
+            (233, 575, LEFT_PANE), (575, 576, SPLIT_SEP),
+            (576, 922, RIGHT_PANE),
+        ]), 233),
+        ("t1 (2 tabs, no split)", make_column_image(800, 600, [
+            (0, 213, SIDEBAR), (213, 214, SEP), (214, 800, TERM),
+        ]), 213),
+        ("t0 (1 tab, no split)", make_column_image(800, 600, [
+            (0, 202, SIDEBAR), (202, 203, SEP), (203, 800, TERM),
+        ]), 202),
+        ("none (no sidebar)", make_column_image(800, 600, [
+            (0, 800, TERM),
+        ]), 0),
+    ]
+
+    ok = True
+    for name, img, truth in cases:
+        got = _measure_sidebar_column(img)
+        passed = abs(got - truth) <= 2
+        ok = ok and passed
+        log(f"sidebar-column-regression: {name}: got={got} truth={truth} "
+            f"{'PASS' if passed else 'FAIL'}")
+
+    if not ok:
+        log("FAIL — _measure_sidebar_column did not reproduce the majordome's "
+            "ground truth on all four scenarios")
+        return 1
+    log("PASS — _measure_sidebar_column matches ground truth on all four "
+        "scenarios, including the none-mode control")
+    return 0
 
 
 def _column_diff_ratio(before, after, col_width=SIDEBAR_COLUMN_WIDTH, y0=0):
@@ -2322,6 +2481,9 @@ def main():
                      help="a 1-tab window's section header must already show the repo name, "
                           "not \"No repository\", by the time a 2nd same-repo tab opens -- "
                           "band-diff measurement with a no-git positive control in the same run")
+    ap.add_argument("--sidebar-column-regression", action="store_true", dest="sidebar_column_regression",
+                     help="_measure_sidebar_column vs 4 self-generated stand-ins for the "
+                          "majordome's reference captures (no X server needed)")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -2342,6 +2504,8 @@ def main():
         return cmd_a11y_focus()
     if args.section_header:
         return cmd_section_header()
+    if args.sidebar_column_regression:
+        return cmd_sidebar_column_regression()
 
     ap.print_help()
     return 1
