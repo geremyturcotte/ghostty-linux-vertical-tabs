@@ -612,13 +612,13 @@ def cmd_menu():
         # around the same frozen-band gap for their own row detection.
         #
         # The right-click itself lands at x=40 (row title text), not
-        # ROW1[0]=160: cmd_scroll_colour (l.665-667) and cmd_drag_reorder
-        # (l.866-868) both document x=160 landing on the row's OWN close
-        # button instead of the row body on a narrow window, and cmd_menu
-        # was the one mode still clicking there -- a "confirmed ABSENT"
-        # from a right-click that hit the close button proves nothing about
-        # whether the row's context menu exists; it is a false negative,
-        # same shape as trusting TAB_OVERVIEW without probing it.
+        # ROW1[0]=160: cmd_scroll_colour and cmd_drag_reorder both document
+        # x=160 landing on the row's OWN close button instead of the row
+        # body on a narrow window, and cmd_menu was the one mode still
+        # clicking there -- a "confirmed ABSENT" from a right-click that
+        # hit the close button proves nothing about whether the row's
+        # context menu exists; it is a false negative, same shape as
+        # trusting TAB_OVERVIEW without probing it.
         band = _scan_close_btn_band(s)
         log(f"menu: close-button band SCANNED at x={band} (window {s.ww}x{s.wh}, cwd={s.cwd})")
         geom = s.measure_row_geometry(close_btn_x=band)
