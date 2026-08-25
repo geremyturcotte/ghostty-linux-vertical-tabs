@@ -250,4 +250,34 @@ jobs:
       #   binary with the fix   -> exit 0, none-column diff 0.00000
       #   positive control identical in both: column measured x=202, 0.89281
       - name: none is really inert (interface, not logs)
-        run: xvfb-run --auto-servernum -- python3 scripts/acceptance-harness.py --none-shortcut
+        run: >-
+          xvfb-run --auto-servernum --
+          sh scripts/acceptance-abstain-gate.sh none-shortcut --
+          python3 scripts/acceptance-harness.py --none-shortcut
+
+      # --- CLIQUET D'ABSTENTION: scripts/acceptance-abstain-gate.sh ---
+      #
+      # acceptance-harness.py modes can exit 0 (PASS), 1 (FAIL), or 2
+      # (CANNOT_MEASURE — the instrument couldn't set its own scene, not a
+      # verdict on the product). A bare `python3 ... --mode` call in CI
+      # cannot tell those apart: GitHub Actions marks ANY nonzero exit red,
+      # so an abstention and a real failure look identical, and there was
+      # no way to notice a mode abstaining forever without opening the log.
+      #
+      # scripts/acceptance-abstain-gate.sh restores that distinction against
+      # scripts/acceptance-abstentions.txt, the versioned list of modes CI
+      # currently permits to abstain (one line per mode, with a reason and a
+      # follow-up chantier tag). It guards the LIST, not the verdict: a rc=1
+      # is always red, and a listed mode that starts passing (rc=0 instead
+      # of 2) is ALSO red — the entry is stale and must be removed, or the
+      # ratchet is guarding nothing.
+      #
+      # --menu is the first mode wired through it: on the CI xvfb display
+      # (800x600) its hamburger-click positive control misses, so it
+      # abstains (rc=2) today. See scripts/acceptance-abstentions.txt for
+      # the reason and the follow-up chantier.
+      - name: menu (row context menu, with positive+negative controls)
+        run: >-
+          xvfb-run --auto-servernum --
+          sh scripts/acceptance-abstain-gate.sh menu --
+          python3 scripts/acceptance-harness.py --menu

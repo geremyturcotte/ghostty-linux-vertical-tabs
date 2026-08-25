@@ -1,0 +1,27 @@
+# scripts/acceptance-abstentions.txt — the CLIQUET D'ABSTENTION's list half.
+#
+# One line per acceptance-harness.py mode that CI is allowed to see abstain
+# (CANNOT_MEASURE = exit 2) without turning the step RED. Read by
+# scripts/acceptance-abstain-gate.sh, which wraps each acceptance-mode
+# invocation in fork-ci.yml.
+#
+# Format (pipe-delimited, 3 fields, no pipes inside a field):
+#   mode|reason|chantier
+#
+# - mode:     the bare mode name passed as this gate's first argument
+#             (e.g. "menu" for --menu), not the flag itself.
+# - reason:   why THIS mode abstains on CI today — an instrument limit,
+#             not a product defect. Free text.
+# - chantier: the tracking tag for the follow-up PR that will fix the
+#             instrument (or the product bug behind it) and remove this
+#             line. Never "someday" — name the work.
+#
+# A mode listed here that starts returning 0 (pass) instead of 2 is a
+# CI failure (RED), not a quiet win: the entry is now stale and must be
+# removed in the same PR that fixed the underlying cause, or the ratchet
+# is guarding nothing.
+#
+# A mode that abstains WITHOUT a line here is also RED: an unrecorded
+# abstention is a hole in coverage, not a known limitation.
+
+menu|HAMBURGER's hardcoded click coordinate was calibrated on a differently-sized window and misses its target on the CI xvfb display (800x600), so --menu's positive control (the hamburger click) fails before the row-menu probe ever runs — needs a coordinate scanned at runtime, not a frozen one (a launch-directory-dependent drift measured on the unrelated close-button band is reason enough not to trust a baked-in pixel value across environments)|HAMBURGER-calibration
