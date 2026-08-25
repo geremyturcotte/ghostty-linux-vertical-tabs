@@ -453,9 +453,55 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
         control failed) when launched from the root of a git repository,
         where `measure_row_geometry` finds one band more than there are tabs.
         Measured on the same window (922x722), same binary, same display,
-        with the launch directory as the only variable. What that extra band
-        is has **not** been measured; the reading that it is a repository
-        section header is refuted by the screenshots (no header is drawn).
+        with the launch directory as the only variable.
+
+        **That extra band is the repository section header.** *Measured
+        2026-08-25 · binary `v1.3.1-sidebar.3` sha256 `63caaf67…5a2ab`
+        (checked against the release's `SHA256SUMS`) · code `9a543aa22` ·
+        probe reproducing `measure_row_geometry`'s exact predicate (`r>150
+        and g>150 and b>150`, never an average) against the live window and
+        saving the image it measured · cwd = the repository root, display
+        `:7` (Xephyr 1400x900), window 922x722.* Within the scanned band
+        `(172, 204)` the ink runs `y=88..98` (11px) and starts at the band's
+        left edge (`x=173`); the three real rows are 8px tall with ink only
+        at `x=192..199` and never touch that edge. Across the whole column
+        the header inks **122 distinct columns** (`x=20..209`) against **17**
+        for a row (`x=87..199`). The header is the repository name in bold,
+        above every row, with no close button — introduced by `507f1fb38`
+        (repository grouping, #10) and re-bound by `98a71255d`. No
+        repository means no section, no header, and exactly N bands; from a
+        repository, N+1. `measure_row_geometry` does not distinguish a close
+        button from any bright text inside its x-band: it counts ink.
+
+        **Those two numbers separate here and nowhere else — do not reuse
+        them as a test.** Re-measured across three launch directories and
+        two binaries (six cells, same window and display): from the
+        repository root the header inks 122 columns against 17 for a row,
+        but from a directory with a very long path the bands are
+        `[178, 207, 127, 207, 127, 212, 161]` — the header's 178 sits
+        *between* row values, seven bands appear for three tabs, and every
+        band touches the scan band's left edge. The pre-`507f1fb38` binary
+        shows no header at all from the repository root (three bands, three
+        tabs) and still produces a fourth band from the long path. So the
+        section header explains the extra band **at the repository root**;
+        it does not explain every extra band, and the 122-vs-17 gap is a
+        property of one launch directory, not a discriminator.
+
+        **SUPERSEDED 2026-08-25 — this item previously stated the
+        opposite**, and it was wrong. Kept verbatim rather than deleted:
+
+        > What that extra band is has **not** been measured; the reading
+        > that it is a repository section header is refuted by the
+        > screenshots (no header is drawn).
+
+        That sentence claimed a *refutation* — a positive claim carrying a
+        full burden of proof — while reading as a statement of a limit. It
+        was written from a screenshot belonging to a **different run** than
+        the measurement it was refuting, and the row **subtitle** in that
+        image carries the same string as the header in a lighter weight,
+        which is what made the header look absent. A negative published
+        against an image not paired to its run is a negative without a
+        control.
       - **Tear-out is a different feature.** `--drag-reorder` measures
         reordering *within* the sidebar. Dragging a tab **out into its own
         window** is not exercised by any harness mode, so this item stays
