@@ -421,6 +421,51 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       the active tab; the sidebar highlight moved to match. Confirmed working.
 - [ ] Drag a tab out into its own window: neither window crashes and both
       sidebars are correct. This is the path the `notify::selected-page` guards
+      exist for. **Still unmeasured — and the reason it used to be called
+      "measured" no longer holds.**
+
+      The block below is kept verbatim as `SUPERSEDED 2026-08-25`. It
+      concluded that tab drag-and-drop "does not exist" and that one
+      `--drag-reorder` run settled both reordering *and* tear-out. Both
+      halves are now false:
+
+      1. **The DND wiring exists in this very tree.**
+         `src/apprt/gtk/class/sidebar_row.zig` declares `drag_source:
+         *gtk.DragSource` and `drop_target: *gtk.DropTarget`, and reorders
+         through `tab_view.reorderPage(source_page, target_pos)`. It arrived
+         in `0fd146333` (2026-08-24 17:43), an ancestor of `main`. This file
+         was edited twice after that commit without the claim being revisited.
+
+      2. **The published artefact passes `--drag-reorder`.** Measured against
+         the release binary `v1.3.1-sidebar.3` (sha256 `63caaf67…5a2ab`,
+         checked against the release's own `SHA256SUMS`), not a local dev
+         build: `exit 0`, *"the synthetic drag moved the coloured row from
+         rank 1 to rank 3, with the same-run `move_tab:1` positive control
+         also green"*. Reproduced twice. The earlier "zero effect" reading
+         came from a dev binary built **before** `0fd146333`, so it was true
+         of that binary and false of the product — the reason this checklist
+         is replayed against the *published* artefact after every release.
+
+      Two conditions must travel with that PASS, or it is not reproducible:
+
+      - **Launch directory matters.** `--drag-reorder` passes from a
+        non-repository working directory and *abstains* (`exit 2`, positive
+        control failed) when launched from the root of a git repository,
+        where `measure_row_geometry` finds one band more than there are tabs.
+        Measured on the same window (922x722), same binary, same display,
+        with the launch directory as the only variable. What that extra band
+        is has **not** been measured; the reading that it is a repository
+        section header is refuted by the screenshots (no header is drawn).
+      - **Tear-out is a different feature.** `--drag-reorder` measures
+        reordering *within* the sidebar. Dragging a tab **out into its own
+        window** is not exercised by any harness mode, so this item stays
+        unchecked as genuinely unmeasured — not as a measured absence.
+
+      <details><summary>SUPERSEDED 2026-08-25 — the original text, kept verbatim</summary>
+
+      ```text
+      - [ ] Drag a tab out into its own window: neither window crashes and both
+      sidebars are correct. This is the path the `notify::selected-page` guards
       exist for. **Measured: the feature does not exist, this is not a
       harness limitation.** Earlier rounds treated this as unmeasurable
       because a click-and-drag spawns no popover-shaped X window for the
@@ -449,6 +494,9 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       still a checklist item that isn't satisfied); implementing the DND
       wiring is out of this worker's declared scope (docs + harness only)
       and needs its own ticket.
+      ```
+
+      </details>
 - [x] Close the last tab: the window closes cleanly. **Measured**: closed the
       2nd-to-last row's `×`, confirmed 1 row remained; closed that last row's
       `×`; the process exited fully within ~1s (`ps aux` showed nothing), no
