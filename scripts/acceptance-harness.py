@@ -517,7 +517,7 @@ def cmd_scroll_colour():
     ~922x722 window a real window manager gives; a bare X server (Xephyr
     here, xvfb in CI) hands out an undecorated 800x600 window instead,
     where both the frozen close-button band AND HAMBURGER=(724,78) land
-    wrong. This is the same root cause cmd_drag_reorder (l.672-726) already
+    wrong. This is the same root cause cmd_drag_reorder already
     measured and worked around -- resize to the reference size, scan the
     close-button band instead of assuming it, and skip colour_row's own
     stale hamburger-menu positive control (still wrong even after the
@@ -2112,13 +2112,23 @@ def _longest_uniform_run(centers, tol=6):
     Two detection chains exist in this file and neither knows the other
     (call sites verified by AST at `48a576d80`):
 
-      A. `Session.measure_row_geometry` -- 5 call sites (`cmd_menu` l.488,
-         `cmd_scroll_colour` l.539, `cmd_drag_reorder` l.737, `cmd_panes`
-         l.1080 and l.1102). It never calls this function. Its only defence
-         against an intruding band is the frozen `y_scan=(105, None)` passed
-         at ONE of those five sites; the other three have nothing.
+      A. `Session.measure_row_geometry` -- 5 call sites: `cmd_menu`,
+         `cmd_scroll_colour`, `cmd_drag_reorder`, and `cmd_panes` twice. It
+         never calls this function. Its only defence against an intruding
+         band is the frozen `y_scan=(105, None)` passed at ONE of those five
+         sites; the other three have nothing.
       B. `_detect_tab_rows` -> this function -- reached only from
-         `cmd_a11y_focus` (l.2196, l.2202).
+         `cmd_a11y_focus`, twice.
+
+    Those call sites were first cited by line number, and two of the seven
+    were already wrong by the time this docstring reached `main`: adding
+    these lines pushed everything below them down, so the two sites that
+    FOLLOW this function moved while the five that PRECEDE it did not. The
+    docstring perished its own citations by being inserted. A line number in
+    a comment is perishable by construction -- it *looks* checkable, it is
+    checkable the day it is written, and it stops being so in silence, with
+    nothing failing and no reader warned. Cite the function: the name
+    survives an insertion.
 
     No remedy is proposed here and none is implied: the cause of the
     band-lands-off-the-sidebar case has not been measured, and the frozen
