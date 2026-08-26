@@ -659,10 +659,50 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       Red visibly marks the row with a red dot. **`docs/PROGRESS.md`'s Task 9
       line ("Right-click menu on rows — ✅ done, verified on screen") is
       corroborated.**
-- [x] With ~6 tabs, colour two, then scroll the list: the colours stay on the
+- [ ] With ~6 tabs, colour two, then scroll the list: the colours stay on the
       right tabs. Rows are recycled, so this is the case that would expose
-      colour state living on the row instead of the page. **Measured, PASS**
-      (`scripts/acceptance-harness.py --scroll-colour`): opened 6 tabs,
+      colour state living on the row instead of the page.
+
+      **`--scroll-colour` does not pass. Measured 2026-08-26** · binary
+      `v1.3.1-sidebar.3` sha256 `63caaf67…5a2ab`, checked against the
+      release's `SHA256SUMS` · code `c0ffd5dab` · mode
+      `scripts/acceptance-harness.py --scroll-colour` · Xephyr `:7`
+      (1400x900 screen, fresh server for this run, checked alive before and
+      after), window 922x722, launch directory = the repository root, which
+      is the invocation this document documents. **Exit 1.**
+
+      The mode does not reach the colour check. It reports
+      `measure_row_geometry: centers=[93.0, 140.5, 196.5, 252.5, 308.5,
+      364.5, 420.5] step_y=56.0 heights=[11, 8, 8, 8, 8, 8, 8]` and then
+      `measured row1_y=93.0` — and `93.0`, the band 11px tall against 8px
+      for every real row, is **the repository section header**, not a tab
+      row. It colours "row 1" on the header. The same reading breaks
+      `--drag-reorder`, whose positive control is asked to move a rank 1
+      that is the header; only `--panes` is unaffected, because it alone
+      passes `y_scan=(105, None)` and so skips that band.
+
+      This is a defect of the HARNESS, not of the product: nothing here
+      says the colours migrate. The item is unchecked because **no run
+      currently demonstrates that they do not** — an unproven claim, not a
+      measured failure of the feature.
+
+      **SUPERSEDED 2026-08-26 — the verdict this item carried, kept
+      verbatim:**
+
+      > **Measured, PASS** (`scripts/acceptance-harness.py
+      > --scroll-colour`)
+
+      It was written against a local development build from 2026-08-24
+      11:30, which predates `507f1fb38` (repository grouping) — that build
+      draws **no section header at all**, so the defect above could not
+      occur on it. The verdict was true of that binary and is false of the
+      published product. That is the exact case element 2 of the rule above
+      exists for, and the run behind the verdict never named its binary.
+
+      What the original entry described of the check's own method is kept
+      below, since the method is unchanged and still worth reading:
+
+      Opened 6 tabs,
       coloured row 1 red and row 2 blue via the now-working row menu, then
       shrank the window (a raw `ConfigureWindow` resize, not XTEST — see the
       script's docstring on `cmd_scroll_colour` for why) so the 6-row list
