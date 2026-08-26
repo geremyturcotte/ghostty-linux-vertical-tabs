@@ -460,7 +460,54 @@ class Session:
             self.proc.kill()
 
 
-def _scan_hamburger_button(session, y_max=60, thresh=150, min_icon_width=10, max_ctrl_width_delta=3):
+def _measure_header_height(img, thresh=150):
+    """The header row's own bottom edge (0-based, inclusive), MEASURED by
+    scanning full-width rows from y=0 for the first gap-terminated band of
+    bright content -- the same "any bright pixel in this scanline, grouped
+    with a gap tolerance" signal measure_row_geometry/_detect_row_bands
+    already use elsewhere in this file, walked top-down and stopped at the
+    first band's own end instead of assuming how tall it is.
+
+    Replaces a real, measured defect: _scan_hamburger_button previously
+    scanned a frozen y in [0, 60) for header icons -- the one number in
+    that function with no measurement behind it, flagged as such before
+    this was written. On this fork's debug-build banner ("Vous utilisez
+    une version de débogage...", which wraps to 2 lines on an 800px
+    window) the banner's own bright text can start inside that frozen 60
+    on some renders (confirmed: it fragmented the trailing window-control
+    cluster's bands from a clean 8/8/8px into 2/2/14px, so the trailing-3
+    same-width check failed and the scan abstained) but not on others --
+    exactly the render-dependent frozen-number failure this file's own
+    convention exists to catch.
+
+    Measured directly instead, same binary and window: the header icon
+    row is y=[20,35] (bright), then a genuine gap at y=[36,61] (no bright
+    pixel anywhere in the row, at any x), then the debug banner's own
+    text starts at y=62. The header's own band therefore ends at y=35 --
+    found by walking down from y=0 and stopping at the first row after
+    content where no column has a bright pixel, never by looking past it
+    or assuming its height.
+
+    Returns None if no bright row was found at all (nothing to anchor a
+    header on -- CANNOT_MEASURE, not a guess)."""
+    px = img.load()
+    w, h = img.size
+    started = False
+    for y in range(h):
+        has = False
+        for x in range(w):
+            r, g, b = px[x, y][:3]
+            if r > thresh and g > thresh and b > thresh:
+                has = True
+                break
+        if has:
+            started = True
+        elif started:
+            return y - 1
+    return (h - 1) if started else None
+
+
+def _scan_hamburger_button(session, thresh=150, min_icon_width=10, max_ctrl_width_delta=3):
     """The hamburger button's (x, y) center, SCANNED at runtime instead of
     trusting the frozen module-level HAMBURGER=(724, 78).
 
@@ -474,17 +521,18 @@ def _scan_hamburger_button(session, y_max=60, thresh=150, min_icon_width=10, max
     "nouvelles=0 remappees=0 popovers=0" every time, exactly cmd_hamburger's
     POSITIVE CONTROL FAILED symptom.
 
-    Method: scan the header band (y in [0, y_max)) for columns with at
-    least one bright (>thresh in every channel) pixel -- the same "any
-    bright pixel in this scanline" grouping measure_row_geometry/
-    _detect_row_bands already use for sidebar rows, transposed to columns
-    instead of rows since the header lays its icons out horizontally, not
-    vertically. Each resulting band's y-center is the bright-pixel extent
-    within that column range. The header's rightmost three bands are always
-    the window controls (minimize/maximize/close): narrower (measured 8px)
-    and mutually within max_ctrl_width_delta of each other, unlike the
-    wider (measured 12-16px) content icons left of them. The hamburger
-    button is the band immediately to their left.
+    Method: measure the header's own vertical extent first
+    (_measure_header_height), then scan that band (y in [0, header_bottom])
+    for columns with at least one bright (>thresh in every channel) pixel
+    -- the same "any bright pixel in this scanline" grouping
+    measure_row_geometry/_detect_row_bands already use for sidebar rows,
+    transposed to columns instead of rows since the header lays its icons
+    out horizontally, not vertically. Each resulting band's y-center is the
+    bright-pixel extent within that column range. The header's rightmost
+    three bands are always the window controls (minimize/maximize/close):
+    narrower (measured 8px) and mutually within max_ctrl_width_delta of
+    each other, unlike the wider (measured 12-16px) content icons left of
+    them. The hamburger button is the band immediately to their left.
 
     Confirmed identical (same relative offset from the window-control
     cluster, same band width) across four resizes of the SAME running
@@ -495,13 +543,17 @@ def _scan_hamburger_button(session, y_max=60, thresh=150, min_icon_width=10, max
     Not a second frozen number: this scans fresh every call, so it tracks
     whatever width the window actually has.
 
-    Returns (x, y), or None if fewer than 4 header bands were found, or the
-    trailing 3 aren't a clean same-width cluster -- nothing to anchor the
-    hamburger band on, which is a CANNOT_MEASURE, not a click attempt."""
+    Returns (x, y), or None if no header band was found at all, if fewer
+    than 4 header-band-height bands were found, or the trailing 3 aren't a
+    clean same-width cluster -- nothing to anchor the hamburger band on,
+    which is a CANNOT_MEASURE, not a click attempt."""
     img = session.screenshot()
     px = img.load()
     w, h = img.width, img.height
-    y_max = min(y_max, h)
+    header_bottom = _measure_header_height(img, thresh=thresh)
+    if header_bottom is None:
+        return None
+    y_max = min(header_bottom + 1, h)
 
     cols = []
     for x in range(w):
