@@ -43,6 +43,8 @@ the app's own state (a pane's pwd) rather than assuming a click did anything
 -- see cmd_panes()'s docstring.
 """
 import argparse
+import datetime
+import hashlib
 import os
 import subprocess
 import sys
@@ -434,10 +436,16 @@ class Session:
             else:
                 gap += 1
 
-        centers = [(g0 + g1) / 2 for g0, g1 in groups]
-        heights = [g1 - g0 + 1 for g0, g1 in groups]
-        if not centers:
+        if not groups:
             raise RuntimeError("measure_row_geometry: no sidebar rows detected -- "
+                                "is the sidebar visible and at least one tab open?")
+
+        row_spans, header_span = _merge_sidebar_row_bands(groups)
+        centers = [(g0 + g1) / 2 for g0, g1 in row_spans]
+        heights = [g1 - g0 + 1 for g0, g1 in row_spans]
+        if not centers:
+            raise RuntimeError("measure_row_geometry: every detected band was consumed as a "
+                                "non-repeating header, leaving no row -- "
                                 "is the sidebar visible and at least one tab open?")
 
         step_y = None
@@ -445,8 +453,16 @@ class Session:
             diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
             step_y = diffs[len(diffs) // 2]  # median
 
-        log(f"measure_row_geometry: centers={centers} step_y={step_y} heights={heights}")
-        return {"row1_y": centers[0], "step_y": step_y, "centers": centers, "heights": heights}
+        log(f"measure_row_geometry: raw_bands={groups} header={header_span} "
+            f"-> centers={centers} step_y={step_y} heights={heights}")
+        return {
+            "row1_y": centers[0],
+            "step_y": step_y,
+            "centers": centers,
+            "heights": heights,
+            "spans": row_spans,
+            "header_dropped": header_span is not None,
+        }
 
     def close(self):
         try:
@@ -687,14 +703,46 @@ def cmd_menu():
         # trusting TAB_OVERVIEW without probing it.
         band = _scan_close_btn_band(s)
         log(f"menu: close-button band SCANNED at x={band} (window {s.ww}x{s.wh}, cwd={s.cwd})")
-        geom = s.measure_row_geometry(close_btn_x=band)
+        try:
+            geom = s.measure_row_geometry(close_btn_x=band)
+        except RuntimeError as exc:
+            return _abstain(
+                "no sidebar row survived band merging",
+                f"close-button band x={band} on window {s.ww}x{s.wh} -- {exc}",
+            )
         row1_y = round(geom["row1_y"])
-        log(f"menu: row centers measured at {geom['centers']} -- right-clicking (40, {row1_y})")
+        row_y0, row_y1 = geom["spans"][0]
+        # measure_row_geometry now REUNITES sub-bands (a row's title +
+        # subtitle render as two gap-separated bands) into one row per
+        # group before returning centers, and drops a non-repeating
+        # leading band as a header rather than folding it into row 1 --
+        # see _merge_sidebar_row_bands's docstring. Before that fix,
+        # row1_y here could BE the header's own center: on a
+        # single-tab window this x-band's 3 raw sub-bands (header,
+        # title, subtitle) used to come back as geom["centers"][0..2]
+        # with no row/header distinction, so the right-click below
+        # landed on the header and "confirmed ABSENT" proved nothing
+        # about the row's own context menu.
+        log(f"menu: row centers measured at {geom['centers']} (header_dropped="
+            f"{geom['header_dropped']}) -- row1 spans y=[{row_y0},{row_y1}] -- "
+            f"right-clicking (40, {row1_y})")
+        if not (row_y0 <= row1_y <= row_y1):
+            # Cannot happen from how row1_y is derived (it's the span's own
+            # midpoint), but an absence is only meaningful proven against a
+            # row -- refuse to publish one on an internal inconsistency
+            # instead of trusting the arithmetic silently.
+            return _abstain(
+                "measured row1_y falls outside its own row's span",
+                f"row1_y={row1_y} not in [{row_y0},{row_y1}] -- the click target cannot be "
+                "proven to land on a row",
+            )
         result = s.probe_click(40, row1_y, button=3, label="row-context-menu")
         if result is None:
             log("row-context-menu: confirmed ABSENT (positive control succeeded in the same run, "
-                f"and the right-click landed on a MEASURED row center y={row1_y} at x=40 -- row "
-                "title text, not the row's own close button -- not a guessed coordinate)")
+                f"the right-click landed on a MEASURED row center y={row1_y} at x=40 -- row "
+                f"title text, not the row's own close button -- and y={row1_y} is PROVEN inside "
+                f"row 1's own measured span y=[{row_y0},{row_y1}] (header_dropped="
+                f"{geom['header_dropped']}), not a guessed coordinate and not the header)")
             return 1
         log(f"row-context-menu: PRESENT — 0x{result['id']:x} {result['w']}x{result['h']} -> {result['png']}")
         return 0
@@ -887,6 +935,51 @@ def _red_centre_in_sidebar(img, col_width=260):
     return sum(ys) / len(ys) if ys else None
 
 
+def _measured_declaration(session, mode):
+    """The five things docs/acceptance.md requires every `Measured` verdict
+    to carry (date, binary, code sha, mode, the variables known to bite),
+    gathered from THIS run instead of asserted by hand -- so a verdict
+    line can never go out undated or naming a binary/commit this run
+    didn't actually see.
+
+    Returns a dict with all five, or None if any of them could not be
+    determined (no ghostty binary to hash, this checkout not a git repo,
+    ...) -- a verdict this function can't fully back is not printed as one
+    by its caller; see cmd_drag_reorder, whose own defect was publishing
+    'NOT IMPLEMENTED (measured)' without ever naming which binary that
+    was measured against.
+
+    binary sha256 is 63caaf67...5a2ab for the published v1.3.1-sidebar.3
+    archive; a local zig-out/bin/ghostty build hashes to something else,
+    which is the point -- this function reports whichever one is actually
+    on disk and running, never assumes the published one."""
+    try:
+        with open(GHOSTTY_BIN, "rb") as f:
+            binary_sha256 = hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+    try:
+        code_sha = subprocess.check_output(
+            ["git", "-C", REPO_ROOT, "rev-parse", "HEAD"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    if not code_sha:
+        return None
+    return {
+        "date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"),
+        "binary_sha256": binary_sha256,
+        "code_sha": code_sha,
+        "mode": mode,
+        "variables": {
+            "cwd": session.cwd,
+            "window": f"{session.ww}x{session.wh}",
+            "display": os.environ.get("DISPLAY", ":0"),
+        },
+    }
+
+
 def cmd_drag_reorder():
     """Tab drag-to-reorder within the sidebar, wired via `GtkDragSource` /
     `GtkDropTarget` on each `SidebarRow` (`src/apprt/gtk/class/sidebar_row.zig`,
@@ -1057,8 +1150,25 @@ def cmd_drag_reorder():
         )
 
         if stayed_at_rank1 and not moved_to_rank3:
-            log("drag-reorder: NOT IMPLEMENTED (measured) — synthetic drag had no effect after "
-                "a same-run positive control confirmed reordering is observable")
+            decl = _measured_declaration(s, "drag-reorder")
+            if decl is None:
+                # docs/acceptance.md's five-things rule, enforced here: an
+                # absence verdict this run cannot NAME the binary/code sha
+                # for is not published as a defect -- see
+                # _measured_declaration's docstring for the incident this
+                # guards (a stale "does not exist" verdict later found
+                # false of the binary that actually shipped).
+                return _abstain(
+                    "cannot name the binary/code sha this negative would be about",
+                    f"GHOSTTY_BIN={GHOSTTY_BIN} or `git -C {REPO_ROOT} rev-parse HEAD` "
+                    "did not resolve -- refusing to publish an unattributed "
+                    "'not implemented' verdict",
+                )
+            log(f"drag-reorder: NOT IMPLEMENTED (measured) — synthetic drag had no effect after "
+                f"a same-run positive control confirmed reordering is observable. "
+                f"date={decl['date']} binary_sha256={decl['binary_sha256']} "
+                f"code_sha={decl['code_sha']} mode=drag-reorder "
+                f"variables={decl['variables']}")
             return 1
         elif moved_to_rank3:
             log("drag-reorder: PASS — the synthetic drag moved the coloured row from rank 1 to "
@@ -1072,6 +1182,96 @@ def cmd_drag_reorder():
             return 2
     finally:
         s.close()
+
+
+def _merge_sidebar_row_bands(groups, tol=2):
+    """Reunite the sub-bands a single sidebar row can render as (a title
+    line and a subtitle line, each its own gap-separated band of bright
+    pixels) into ONE row per band group, BEFORE anything counts rows --
+    and derive how many sub-bands make one row from the REPEATING height
+    pattern the bands themselves carry, never a fixed size.
+
+    The same x-band scan can land on two different things depending on
+    where it happens to fall: the close button (measured: one sub-band IS
+    one row, heights uniform, e.g. h=8 x3 for 3 real rows) or the row's
+    own title+subtitle text (measured: two sub-bands make one row, a
+    repeating (15, 10) pair). Nothing at this point in the scan says which
+    one it is -- only the height sequence's own repetition does, so this
+    derives the group size from that sequence instead of assuming 2 (or
+    any other constant). Pairing bands two-by-two unconditionally was
+    tried and rejected: it turns the close-button case's 3 real rows into
+    a false 1.5 rows, and it has no way to notice a genuine 1-band-per-row
+    layout at all.
+
+    A single leading band that never repeats (measured: a header row,
+    rendered above the first tab row in the same x-band, with its own
+    distinct height -- e.g. 11px against the (15, 10) row pattern) is
+    dropped rather than folded into row 1: folding it in would count the
+    header as part of row 1's own band and shift every center after it.
+    This is exactly the bug being fixed here -- geom["row1_y"] pointing at
+    the header instead of the first real row turned a right-click that
+    landed on the header into a false "row-context-menu: confirmed
+    ABSENT".
+
+    This derivation assumes every tab row renders the SAME number of
+    sub-bands -- concretely, that every row carries a subtitle. No row
+    without one has ever been observed on this codebase's sidebar, but if
+    a single row were ever missing its subtitle, the height sequence would
+    desynchronise from that row onward and this function has no signal in
+    the pattern alone to catch it; only a second, independent detector
+    would.
+
+    Returns (row_spans, header_span_or_None): row_spans is a list of
+    [y0, y1] pairs, each merged over its member sub-bands' own extents, in
+    original band order; header_span is the raw [y0, y1] band dropped as a
+    non-repeating leader, or None if nothing was dropped."""
+    if len(groups) < 2:
+        return [list(g) for g in groups], None
+
+    heights = [g1 - g0 + 1 for g0, g1 in groups]
+
+    def tiles(seq, period_len):
+        if period_len <= 0 or len(seq) % period_len != 0:
+            return False
+        period = seq[:period_len]
+        return all(
+            abs(a - b) <= tol
+            for i in range(period_len, len(seq), period_len)
+            for a, b in zip(seq[i:i + period_len], period)
+        )
+
+    def smallest_period(seq, allow_trivial):
+        if not seq:
+            return None
+        upper = len(seq) if allow_trivial else len(seq) - 1
+        for period_len in range(1, upper + 1):
+            if tiles(seq, period_len):
+                return period_len
+        return None
+
+    def merge(spans, period_len):
+        return [[chunk[0][0], chunk[-1][1]]
+                for i in range(0, len(spans), period_len)
+                for chunk in [spans[i:i + period_len]]]
+
+    # Whole sequence first, no header dropped -- excludes the trivial
+    # "the entire sequence is one row" match, since accepting it here
+    # would swallow a real header into row 1.
+    period = smallest_period(heights, allow_trivial=False)
+    if period is not None:
+        return merge(groups, period), None
+
+    # No repetition across the whole sequence: try again after dropping
+    # the first band as a candidate header. Trivial ("everything left is
+    # one row") IS accepted here -- once the header is isolated, there is
+    # nothing else the remainder could be.
+    period = smallest_period(heights[1:], allow_trivial=True)
+    if period is not None:
+        return merge(groups[1:], period), groups[0]
+
+    # No repeating pattern found either way: leave every band as its own
+    # row, the safe default when the pattern can't be derived.
+    return [list(g) for g in groups], None
 
 
 def _detect_row_bands(img, x_range, y_range, thresh=150):
