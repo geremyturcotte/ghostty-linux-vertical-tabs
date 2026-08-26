@@ -276,10 +276,13 @@ jobs:
       # (800x600) its hamburger-click positive control used to miss (the
       # click coordinate was a constant frozen on a differently-sized
       # window) and it abstained (rc=2). Fixed by scanning the hamburger
-      # button's position at runtime instead (HAMBURGER-calibration) --
-      # --menu now passes (rc=0) and is no longer listed in
-      # scripts/acceptance-abstentions.txt; the gate above still applies to
-      # any mode that IS listed there.
+      # button's position at runtime instead (HAMBURGER-calibration) -- and
+      # no longer listed in scripts/acceptance-abstentions.txt. This is not
+      # "now passes" without qualification: it passes on the CI xvfb
+      # display; it exits 1 on the published binary launched from the
+      # repository root, where the section header takes rank 1 -- see
+      # docs/acceptance.md. The gate above still applies to any mode that
+      # IS listed there.
       - name: menu (row context menu, with positive+negative controls)
         run: >-
           xvfb-run --auto-servernum --
