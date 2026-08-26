@@ -277,12 +277,49 @@ jobs:
       # click coordinate was a constant frozen on a differently-sized
       # window) and it abstained (rc=2). Fixed by scanning the hamburger
       # button's position at runtime instead (HAMBURGER-calibration) -- and
-      # no longer listed in scripts/acceptance-abstentions.txt. This is not
-      # "now passes" without qualification: it passes on the CI xvfb
-      # display; it exits 1 on the published binary launched from the
-      # repository root, where the section header takes rank 1 -- see
-      # docs/acceptance.md. The gate above still applies to any mode that
-      # IS listed there.
+      # no longer listed in scripts/acceptance-abstentions.txt.
+      #
+      # A second, separate false negative was found and fixed after that:
+      # Session.measure_row_geometry's own band detector did not reunite a
+      # row's title+subtitle sub-bands before counting rows, so on a window
+      # with a single tab open (this mode's own scene -- it opens no tab
+      # itself) the x-band it scans can return [header, title, subtitle] as
+      # THREE separate bands with no row/header distinction, and the row-1
+      # click landed on the header instead of the row. Confirmed on the
+      # published v1.3.1-sidebar.3 archive (sha256 63caaf67...5a2ab),
+      # cwd=repository root, window 800x600, under Xephyr: pre-fix rc=1
+      # ("row-context-menu: confirmed ABSENT", click at y=93, the header's
+      # own center); post-fix rc=0 (right-click at y=140, PROVEN inside row
+      # 1's own measured span y=[126,155], header dropped) -- see
+      # _merge_sidebar_row_bands's and cmd_menu's docstrings. This is not
+      # "now passes everywhere" either: it is a row DETECTOR fix, not a
+      # guarantee this x-band always resolves to a clean row/header split
+      # on every geometry -- when it can't, this mode abstains (rc=2)
+      # rather than guess, and scripts/acceptance-abstentions.txt is the
+      # record of where that is currently expected. The gate above still
+      # applies to any mode that IS listed there.
+      # --- row-band-merge regression: the control the fix above needed ---
+      #
+      # `--menu` going green here is NOT evidence _merge_sidebar_row_bands
+      # works: this same job, same --menu step, was ALSO green before that
+      # function existed -- --menu's own scene on this xvfb window never
+      # happened to hit the header-band case the fix targets, so CI could
+      # not distinguish the repaired detector from the broken one. A prose
+      # comment describing two local runs is not a measurement either: it
+      # goes stale the moment someone touches the period derivation and
+      # nothing re-checks it.
+      #
+      # cmd_row_band_merge_regression is a pure-function control: no X
+      # server, no binary, no xvfb-run wrapper. It replays the real 1-tab
+      # false-negative band sequence WITHOUT reunion (must reproduce the
+      # false negative -- row1_y on the header) and WITH reunion (must fix
+      # it) in the same run, plus a single-band case and the period-1
+      # close-button case borne 2 promises. It FAILS if reunion stops
+      # fixing case 1, or if the pre-fix simulation stops reproducing the
+      # bug it's meant to prove exists.
+      - name: row-band-merge regression (pure function, no X server)
+        run: python3 scripts/acceptance-harness.py --row-band-merge-regression
+
       - name: menu (row context menu, with positive+negative controls)
         run: >-
           xvfb-run --auto-servernum --

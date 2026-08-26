@@ -562,6 +562,33 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
         which is what made the header look absent. A negative published
         against an image not paired to its run is a negative without a
         control.
+      - **SUPERSEDED 2026-08-25 — "abstains from a repository root" no
+        longer holds**, on this branch. The two paragraphs above are the
+        record of the state that produced that reading and are kept
+        verbatim rather than deleted. `measure_row_geometry` did not
+        reunite a row's title/subtitle sub-bands into one row before
+        counting, so a leading, non-repeating band (the repository section
+        header, or on `--menu`'s own scene a title+subtitle pair alone)
+        shifted every centre after it — the same root cause behind
+        `--menu`'s false "row-context-menu: confirmed ABSENT" documented
+        below. `_merge_sidebar_row_bands` now derives the repeat unit from
+        the bands' own height pattern and drops a non-repeating leading
+        band instead of folding it into row 1.
+
+        **Measured 2026-08-25** · binary `v1.3.1-sidebar.3` sha256
+        `63caaf674cd7337cbd8a26137cc9b61287e15dd072fc08646fb6d05811a5a2ab`
+        · code sha printed by the mode itself (see `_measured_declaration`)
+        · mode `--drag-reorder` · cwd = repository root, display Xephyr
+        `:2` (800x600 outer, 922x722 reference window this mode resizes
+        itself to). `measure_row_geometry` now reports `raw_bands=[[88,
+        98], [137, 144], [193, 200], [249, 256]] header=[88, 98] ->
+        centers=[140.5, 196.5, 252.5]` — the header dropped, exactly 3 rows
+        for 3 tabs — and the mode itself reports `PASS`, positive control
+        included, from the repository root. The launch-directory condition
+        this bullet used to require no longer applies to the row-detector
+        version in this commit; it may still apply to
+        `scripts/acceptance-harness.py` at older commits, which is why the
+        record above is kept rather than deleted.
       - **Tear-out is a different feature.** `--drag-reorder` measures
         reordering *within* the sidebar. Dragging a tab **out into its own
         window** is not exercised by any harness mode, so this item stays
@@ -659,6 +686,46 @@ model handed over unwrapped would switch the live terminal on mouse-over. The
       Red visibly marks the row with a red dot. **`docs/PROGRESS.md`'s Task 9
       line ("Right-click menu on rows — ✅ done, verified on screen") is
       corroborated.**
+
+      **A second, separate false negative in `--menu` itself, found and
+      fixed 2026-08-25.** `cmd_menu` opens no tab of its own — its scene is
+      whatever the launched process starts with, one tab — and right-clicks
+      `measure_row_geometry`'s `row1_y` at `x=40` to check the row's own
+      context menu exists. Before this fix, on a single-tab window that
+      x-band's title+subtitle sub-bands (and, from the repository root, the
+      section header above them) came back as separate, un-reunited bands
+      with no row/header distinction, so `row1_y` could BE the header's own
+      centre — the click landed above the row entirely, and `--menu`
+      published `row-context-menu: confirmed ABSENT`, a false negative with
+      a real popover behind it.
+
+      **Measured 2026-08-25** · binary `v1.3.1-sidebar.3` sha256
+      `63caaf674cd7337cbd8a26137cc9b61287e15dd072fc08646fb6d05811a5a2ab`
+      (matches the archive named throughout this document) · code sha
+      `0d1a97af8eee47a15ad7c8f735ddd921e11a8db7` (pre-fix) vs. this commit
+      (post-fix) · mode `scripts/acceptance-harness.py --menu` · cwd =
+      repository root, display Xephyr `:2` (800x600), one tab. Same run
+      shape, code toggled via `git stash`, nothing else changed:
+
+      ```
+      pre-fix:  measure_row_geometry: centers=[93.0, 133.0, 150.5] heights=[11, 15, 10]
+                menu: right-clicking (40, 93)
+                row-context-menu: confirmed ABSENT                          # exit 1
+
+      post-fix: measure_row_geometry: raw_bands=[[88, 98], [126, 140], [146, 155]]
+                header=[88, 98] -> centers=[140.5] heights=[30]
+                menu: row1 spans y=[126,155] -- right-clicking (40, 140)
+                row-context-menu: PRESENT — 258x156 popover                 # exit 0
+      ```
+
+      `_merge_sidebar_row_bands` (in `scripts/acceptance-harness.py`) fixes
+      this by reuniting a row's sub-bands and dropping a non-repeating
+      leading band — deriving the sub-band count per row from the height
+      sequence's own repetition (never a fixed size: the same function
+      also serves the close-button x-band, where one sub-band already is
+      one row). `cmd_menu` additionally now proves, in its own log line,
+      that the right-click y falls inside row 1's measured span before
+      publishing an absence — see its docstring-adjacent comment.
 - [ ] With ~6 tabs, colour two, then scroll the list: the colours stay on the
       right tabs. Rows are recycled, so this is the case that would expose
       colour state living on the row instead of the page.
