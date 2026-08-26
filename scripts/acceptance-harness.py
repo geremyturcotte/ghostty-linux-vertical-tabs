@@ -126,7 +126,7 @@ def _wait_for_no_stray_ghostty(timeout=8.0):
         time.sleep(0.5)
 
 
-def launch_ghostty(extra_config="", sidebar_mode="left", cwd=None):
+def launch_ghostty(extra_config="", sidebar_mode="left", cwd=None, capture_stderr=False):
     if not os.path.exists(GHOSTTY_BIN):
         raise RuntimeError(
             f"no ghostty binary at {GHOSTTY_BIN} (GHOSTTY_BIN is REPO_ROOT/zig-out/bin/ghostty, "
@@ -148,10 +148,21 @@ def launch_ghostty(extra_config="", sidebar_mode="left", cwd=None):
         f.write(f"gtk-sidebar-tabs = {sidebar_mode}\n")
         f.write(extra_config)
     env["XDG_CONFIG_HOME"] = cfgdir
+    stderr_path = None
+    stderr_dest = subprocess.DEVNULL
+    if capture_stderr:
+        # The product's own std.log goes to stderr; discarding it (the prior
+        # behaviour, unconditionally) throws away what the binary itself says
+        # about config decisions like probable_cli's shell-source gate --
+        # measured directly, not derived from this harness's own click verdict.
+        stderr_path = os.path.join(cfgdir, "ghostty-stderr.log")
+        stderr_dest = open(stderr_path, "wb")
     proc = subprocess.Popen(
-        [GHOSTTY_BIN], env=env, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [GHOSTTY_BIN], env=env, cwd=cwd, stdout=subprocess.DEVNULL, stderr=stderr_dest
     )
-    return proc
+    if capture_stderr:
+        stderr_dest.close()  # child holds its own dup'd fd; safe to close our handle
+    return proc, stderr_path
 
 
 def tree(win, acc=None):
@@ -196,12 +207,14 @@ def find_ghostty_window(d, root, timeout=8.0):
 class Session:
     """One ghostty process + its X connection, window handle, and absolute origin."""
 
-    def __init__(self, extra_config="", sidebar_mode="left", cwd=None):
+    def __init__(self, extra_config="", sidebar_mode="left", cwd=None, capture_stderr=False):
         self.cwd = cwd or os.getcwd()  # declared, not left implicit -- the sidebar's tab
                                         # title is the cwd, so its width (and therefore
                                         # where the row's own close button lands) depends
                                         # on this same as it depends on window geometry
-        self.proc = launch_ghostty(extra_config, sidebar_mode, cwd=cwd)
+        self.proc, self.stderr_path = launch_ghostty(
+            extra_config, sidebar_mode, cwd=cwd, capture_stderr=capture_stderr
+        )
         time.sleep(6.0)  # window map + first paint settle (proven recipe)
         self.d = display.Display(os.environ.get("DISPLAY", ":0"))
         self.root = self.d.screen().root
@@ -453,6 +466,21 @@ class Session:
             diffs = sorted(centers[i + 1] - centers[i] for i in range(len(centers) - 1))
             step_y = diffs[len(diffs) // 2]  # median
 
+        # See MIN_ROW_HEIGHT_PX's own docstring for where this threshold
+        # comes from (the citable gap between this photograph's one
+        # degenerate run and its healthy runs) and what it does NOT cover.
+        # Caught here, before row1_y can be trusted, instead of downstream
+        # where a click on a degenerate coordinate would silently read as a
+        # measured negative.
+        degenerate = _check_row_heights_measurable(heights)
+        if degenerate:
+            raise RuntimeError(
+                f"measure_row_geometry: {len(degenerate)} of {len(heights)} row band(s) "
+                f"measured under {MIN_ROW_HEIGHT_PX}px (heights={heights}, step_y={step_y}, "
+                f"spans={row_spans}, raw_bands={groups}) -- too thin to be a real sidebar "
+                "row; refusing to publish a click target derived from a degenerate geometry"
+            )
+
         log(f"measure_row_geometry: raw_bands={groups} header={header_span} "
             f"-> centers={centers} step_y={step_y} heights={heights}")
         return {
@@ -463,6 +491,23 @@ class Session:
             "spans": row_spans,
             "header_dropped": header_span is not None,
         }
+
+    def read_stderr(self):
+        """Whatever the ghostty binary itself printed to stderr this run
+        (std.log's default sink) -- only populated when the Session was
+        constructed with capture_stderr=True, since that's a change from
+        this harness's prior default of throwing all three ghostty-binary
+        stderr sinks away (see launch_ghostty). Empty string if capture
+        wasn't requested, the process hasn't written anything yet, or the
+        file can't be read (never raises -- a missing/incomplete capture is
+        a fact to report, not a crash)."""
+        if not self.stderr_path:
+            return ""
+        try:
+            with open(self.stderr_path, "rb") as f:
+                return f.read().decode("utf-8", "replace")
+        except OSError:
+            return ""
 
     def close(self):
         try:
@@ -657,9 +702,66 @@ def cmd_hamburger():
         s.close()
 
 
+def _derive_probable_cli(stderr_text):
+    """probable_cli's gate state, MEASURED from the product's own stderr
+    (Config.zig's std.log lines), not derived from this harness's own
+    click verdict -- the two answer different questions: the row-menu
+    click result says whether a popover opened, this says whether
+    Config.resolve() read SHELL from the environment at all. Looks for the
+    exact log.info lines src/config/Config.zig prints during shell
+    resolution:
+      - "default shell source=env value=..."   -> probable_cli was true
+        AND SHELL was set/read: gate OPEN.
+      - "default shell src=passwd value=..."    -> the getpwuid fallback
+        ran, which happens both when probable_cli is false (the SHELL-env
+        branch is skipped entirely) and when it's true but SHELL was
+        unset/unreadable -- on its own this line alone does not prove the
+        gate was closed, only that the environment probe did not supply a
+        shell.
+      - "shell src=config value=..."            -> self.command was
+        already set from config; the probable_cli branch was never
+        reached at all (gate not exercised this run).
+    Returns (gate, evidence_line)."""
+    for line in stderr_text.splitlines():
+        if "default shell source=env" in line:
+            return "OUVERTE", line.strip()
+    for line in stderr_text.splitlines():
+        if "shell src=config" in line:
+            return "N/A(command deja fourni par la config, porte non exercee)", line.strip()
+    for line in stderr_text.splitlines():
+        if "default shell src=passwd" in line:
+            return "INDETERMINEE(fallback passwd -- ne distingue pas gate=false de gate=true+SHELL absent)", line.strip()
+    return "INDETERMINEE(aucune ligne 'default shell'/'shell src=config' vue dans stderr)", ""
+
+
 def cmd_menu():
-    s = Session()
+    s = Session(capture_stderr=True)
     try:
+        # Reference-size resize, same as cmd_scroll_colour/cmd_drag_reorder:
+        # measured defect (2026-08-26) -- this mode alone stayed at the bare
+        # X server's undecorated 800x600 while running the SAME row-band
+        # detector those two resize before using, and on THAT window its
+        # own row-1 band came back heights=[1,2] step_y=6.5 (raw_bands=
+        # [[129,129],[135,136]]) against every other mode's healthy
+        # heights=[9,10] step_y~54-56 in the same run -- a degenerate
+        # geometry the mode's PASS did not depend on (it only asserts "a
+        # popover appeared"), so it went unnoticed. Resizing here removes
+        # the distinguishing variable instead of trusting the narrow
+        # window's band; measure_row_geometry's own MIN_ROW_HEIGHT_PX
+        # guard (see its docstring) now also refuses to publish a
+        # degenerate band as a click target, so a recurrence ABSTAINS
+        # instead of silently clicking noise.
+        s.win.configure(width=922, height=722)
+        s.d.sync()
+        time.sleep(1.0)
+        g = s.win.get_geometry()
+        s.ww, s.wh = g.width, g.height
+        log(f"menu: resized to reference window {s.ww}x{s.wh}")
+
+        gate, evidence = _derive_probable_cli(s.read_stderr())
+        log(f"menu: PRODUIT probable_cli={gate} -- mesure dans le stderr du binaire fork "
+            f"(pas dans le verdict du harnais) -- evidence={evidence!r}")
+
         ham = _scan_hamburger_button(s)
         if ham is None:
             return _abstain(
@@ -1184,6 +1286,41 @@ def cmd_drag_reorder():
         s.close()
 
 
+MIN_ROW_HEIGHT_PX = 5
+"""Threshold for _check_row_heights_measurable, derived ONLY from the
+citable corpus -- this photograph, commit 9c6af831a, 2026-08-26 -- never
+from anything before it (PEREMPTION CAS 1). The gap, named by run:
+
+  degenerate (rejected): menu.log first pass, window 800x600 unresized,
+    row1 raw_bands=[[129,129],[135,136]] -> heights=[1,2]. max degenerate
+    measured = 2.
+  healthy (accepted): drag-reorder.log heights=[10,10,10]; panes.log
+    baseline heights=[10,10,10]; scroll-colour.log heights=[10,10,10,10,
+    10,10]; menu-REPLAY.log heights=[10]. min healthy measured = 10. Every
+    one of these four runs measured at window 922x722 (each resizes to
+    that reference size before calling measure_row_geometry).
+
+max degenerate (2) < MIN_ROW_HEIGHT_PX (5) < min healthy (10): the
+threshold falls inside the observed gap, not derived from a single
+measurement. What this does NOT establish, honestly: the citable corpus
+has exactly one 800x600 measurement and it is the degenerate one -- there
+is no citable healthy measurement at 800x600, so this gap is proven at
+922x722 only, not "at either window size". It is also one binary
+(a7e2fb5e...b68), one display family (Xephyr, X11), one harness commit's
+worth of evidence -- not a general claim about any other geometry, binary,
+or display this guard has not actually seen."""
+
+
+def _check_row_heights_measurable(heights, threshold=MIN_ROW_HEIGHT_PX):
+    """Pure predicate over an already-measured heights list: which ones (if
+    any) fall under threshold px, too thin to be a real sidebar row -- see
+    MIN_ROW_HEIGHT_PX's own docstring for where the threshold comes from.
+    Returns the degenerate subset (empty list = every height measurable).
+    No X server, no binary, no Session -- a list of ints in, a list of
+    ints out, so it can be exercised in CI without a display."""
+    return [h for h in heights if h < threshold]
+
+
 def _merge_sidebar_row_bands(groups, tol=2):
     """Reunite the sub-bands a single sidebar row can render as (a title
     line and a subtitle line, each its own gap-separated band of bright
@@ -1373,6 +1510,89 @@ def cmd_row_band_merge_regression():
     log("PASS — WITHOUT reunion reproduces the header false-negative on the real 1-tab "
         "sequence; WITH reunion fixes it, leaves a lone band alone, and correctly derives "
         "period 1 (not a fixed pairing) on the close-button sequence")
+    return 0
+
+
+def cmd_row_height_guard_regression():
+    """Proves _check_row_heights_measurable (the MIN_ROW_HEIGHT_PX guard
+    measure_row_geometry now calls before trusting a click target) rejects
+    the real degenerate sequence that produced --menu's false positive on
+    2026-08-26, and passes clean on real healthy sequences from the same
+    photograph -- including panes's own real heights, which are ALL
+    individually healthy despite that mode's separate, unrelated band-COUNT
+    defect (5 bands measured for 3 real open tabs, panes.log) this guard is
+    not built to see and does not claim to. No X server, no binary -- pure
+    function over lists of already-measured heights, same shape as
+    --row-band-merge-regression.
+
+    Committed CI going green on a branch carrying this guard is NOT by
+    itself evidence the guard works -- a threshold check that always
+    passes (e.g. a stray `>= 0`) would also go green here. This is the
+    control that FAILS if the guard stops rejecting the real degenerate
+    case or starts rejecting a real healthy one, on the exact sequences
+    named below -- not invented numbers.
+
+    Three cases, all from this repo's own .prokai/tmp/photo11/ logs
+    (commit 9c6af831a, 2026-08-26 -- nothing cited from before it):
+
+    1. menu.log (first pass, pre-fix, window 800x600 unresized), row1's
+       measured heights=[1,2] (raw_bands=[[129,129],[135,136]]) -- the
+       exact degenerate geometry --menu clicked as if it were a real row,
+       reporting PASS from it. MUST be flagged degenerate.
+
+    2. drag-reorder.log (same photograph, window resized to the 922x722
+       reference before measuring), 3 real rows, heights=[10,10,10]. MUST
+       pass clean -- menu-REPLAY.log's own post-fix heights=[10] (also
+       922x722) is the same shape.
+
+    3. panes.log (same photograph, also resized to 922x722), the SPLIT
+       measurement whose row COUNT is panes's own real, separate,
+       unrelated defect (5 bands for 3 known open tabs -- see panes.log's
+       own ABSTENTION, untouched by this PR): heights=[10,10,9,9,10].
+       Every individual height here is healthy (>=10 or =9, both >=
+       MIN_ROW_HEIGHT_PX=5). MUST pass clean -- honestly documenting that
+       this guard cannot and does not catch panes's defect, rather than
+       silently implying it does."""
+    ok = True
+
+    def check(name, got, want):
+        nonlocal ok
+        passed = got == want
+        ok = ok and passed
+        log(f"row-height-guard-regression: {name}: got={got} want={want} "
+            f"{'PASS' if passed else 'FAIL'}")
+        return passed
+
+    # Case 1: menu.log, first pass, pre-fix degenerate row1 band.
+    degenerate_heights = [1, 2]
+    flagged = _check_row_heights_measurable(degenerate_heights)
+    log(f"row-height-guard-regression: case1 (menu.log pre-fix) heights={degenerate_heights} "
+        f"flagged={flagged}")
+    check("case1 (menu.log pre-fix, heights=[1,2]) is flagged degenerate",
+          bool(flagged), True)
+
+    # Case 2: drag-reorder.log, same photograph, 922x722 reference resize.
+    healthy_heights = [10, 10, 10]
+    flagged2 = _check_row_heights_measurable(healthy_heights)
+    log(f"row-height-guard-regression: case2 (drag-reorder.log) heights={healthy_heights} "
+        f"flagged={flagged2}")
+    check("case2 (drag-reorder.log, heights=[10,10,10]) passes clean", bool(flagged2), False)
+
+    # Case 3: panes.log's own contaminated-count split -- individually
+    # healthy heights, real defect is band count, invisible to this guard.
+    panes_split_heights = [10, 10, 9, 9, 10]
+    flagged3 = _check_row_heights_measurable(panes_split_heights)
+    log(f"row-height-guard-regression: case3 (panes.log split) heights={panes_split_heights} "
+        f"flagged={flagged3}")
+    check("case3 (panes.log, heights=[10,10,9,9,10], all individually healthy) passes clean "
+          "-- this guard does not see panes's real band-count defect", bool(flagged3), False)
+
+    if not ok:
+        log("FAIL — the row-height guard did not reproduce the real degenerate case "
+            "and/or wrongly flagged a real healthy sequence from this photograph")
+        return 1
+    log("PASS — the guard flags the real pre-fix degenerate menu geometry, and passes clean "
+        "on the real healthy drag-reorder and panes sequences from the same photograph")
     return 0
 
 
@@ -3090,6 +3310,10 @@ def main():
     ap.add_argument("--row-band-merge-regression", action="store_true", dest="row_band_merge_regression",
                      help="_merge_sidebar_row_bands vs the real measured 1-tab false-negative "
                           "sequence, WITHOUT and WITH reunion in the same run (no X server needed)")
+    ap.add_argument("--row-height-guard-regression", action="store_true", dest="row_height_guard_regression",
+                     help="_check_row_heights_measurable (MIN_ROW_HEIGHT_PX) vs the real degenerate "
+                          "--menu false-positive geometry and real healthy drag-reorder/panes "
+                          "geometry from the same photograph (no X server needed)")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -3114,6 +3338,8 @@ def main():
         return cmd_sidebar_column_regression()
     if args.row_band_merge_regression:
         return cmd_row_band_merge_regression()
+    if args.row_height_guard_regression:
+        return cmd_row_height_guard_regression()
 
     ap.print_help()
     return 1

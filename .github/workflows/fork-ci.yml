@@ -320,6 +320,31 @@ jobs:
       - name: row-band-merge regression (pure function, no X server)
         run: python3 scripts/acceptance-harness.py --row-band-merge-regression
 
+      # --- row-height guard regression: the control this mode's own
+      # 2026-08-26 false positive needed ---
+      #
+      # `--menu` going green is likewise not evidence
+      # _check_row_heights_measurable (MIN_ROW_HEIGHT_PX) is doing anything:
+      # this mode was ALSO green (rc=0) the run it clicked a degenerate
+      # 800x600-unresized row band (heights=[1,2], step_y=6.5) as if it were
+      # a real row -- its own assertion only checks "did a popover appear",
+      # never the geometry that produced the click target, so a passing
+      # --menu step here proves nothing about whether the guard is wired at
+      # all, let alone whether someone loosened it later.
+      #
+      # cmd_row_height_guard_regression is a pure-function control, same
+      # shape as row-band-merge-regression above: no X server, no binary.
+      # It replays the real degenerate heights=[1,2] from that run (must be
+      # flagged) alongside real healthy heights from drag-reorder.log and
+      # panes.log, both measured at the reference 922x722 window in the
+      # same photograph (must pass clean) -- including panes's own
+      # individually-healthy-but-miscounted split, so this control also
+      # documents what the guard does NOT catch (panes's band-count defect,
+      # tracked separately) rather than implying broader coverage than it
+      # has.
+      - name: row-height guard regression (pure function, no X server)
+        run: python3 scripts/acceptance-harness.py --row-height-guard-regression
+
       - name: menu (row context menu, with positive+negative controls)
         run: >-
           xvfb-run --auto-servernum --
