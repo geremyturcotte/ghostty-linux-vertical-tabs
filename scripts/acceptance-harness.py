@@ -471,22 +471,31 @@ def _measure_header_height(img, thresh=150):
     Replaces a real, measured defect: _scan_hamburger_button previously
     scanned a frozen y in [0, 60) for header icons -- the one number in
     that function with no measurement behind it, flagged as such before
-    this was written. On this fork's debug-build banner ("Vous utilisez
-    une version de débogage...", which wraps to 2 lines on an 800px
-    window) the banner's own bright text can start inside that frozen 60
-    on some renders (confirmed: it fragmented the trailing window-control
-    cluster's bands from a clean 8/8/8px into 2/2/14px, so the trailing-3
-    same-width check failed and the scan abstained) but not on others --
-    exactly the render-dependent frozen-number failure this file's own
-    convention exists to catch.
+    this was written. 60 overshoots the header's real bottom edge and
+    reaches whatever is drawn just below it -- and what's drawn there
+    depends on the BUILD, not on this file: on the published Release
+    binary (v1.3.1-sidebar.3, sha256 63caaf67...5a2ab), the terminal's
+    own first prompt line starts at y=56, comfortably inside the old
+    frozen 60, and fragments the trailing window-control cluster's bands
+    there (measured by a second reader against that binary). On the local
+    build this repo's zig-out/bin/ghostty was built from (commit
+    92a554561, Debug, built 2026-08-24 11:30 EDT), the same window shows a
+    gap at y=[36,61] with nothing below the header until y=62, one row
+    PAST the old frozen 60 -- so 60 happened not to break there, by
+    coincidence of that particular build's layout, not because it was
+    safe. Two different builds, two different reasons the same frozen
+    number is wrong; the fix does not need to know which -- only that a
+    frozen bound this file never checked against its own render is not
+    trustworthy on any of them.
 
-    Measured directly instead, same binary and window: the header icon
-    row is y=[20,35] (bright), then a genuine gap at y=[36,61] (no bright
-    pixel anywhere in the row, at any x), then the debug banner's own
-    text starts at y=62. The header's own band therefore ends at y=35 --
-    found by walking down from y=0 and stopping at the first row after
-    content where no column has a bright pixel, never by looking past it
-    or assuming its height.
+    Measured directly on the commit-92a554561 Debug build, same window:
+    the header icon row is y=[20,35] (bright), then a gap at y=[36,61]
+    (no bright pixel anywhere in the row, at any x) that happens to be
+    empty on this particular build, then the terminal's own first content
+    starts at y=62. The header's own band therefore ends at y=35 -- found
+    by walking down from y=0 and stopping at the first row after content
+    where no column has a bright pixel, never by looking past it or
+    assuming its height.
 
     Returns None if no bright row was found at all (nothing to anchor a
     header on -- CANNOT_MEASURE, not a guess)."""
@@ -513,13 +522,18 @@ def _scan_hamburger_button(session, thresh=150, min_icon_width=10, max_ctrl_widt
 
     HAMBURGER was measured on a ~922-wide window a real window manager
     handed out. Under a bare X server (Xephyr locally, xvfb in CI) the
-    window is 800x600 and undecorated: measured 2026-08-25, same binary,
-    same display, same window, same cwd -- only the window-management state
-    differs -- the header row's icon glyphs sit at x~[28, 68, 96, 624, 658],
-    y~28, not x=724, y=78. A click at the frozen constant lands right of and
-    below the real button and opens nothing: probe_click reports
-    "nouvelles=0 remappees=0 popovers=0" every time, exactly cmd_hamburger's
-    POSITIVE CONTROL FAILED symptom.
+    window is 800x600 and undecorated: measured 2026-08-25 on this repo's
+    zig-out/bin/ghostty (built from commit 92a554561, Debug, built
+    2026-08-24 11:30 EDT -- a local build, not a release tag, so the
+    commit+timestamp is the identity), same display, same window, same
+    cwd -- only the window-management state differs -- the header row's
+    icon glyphs sit at x~[28, 68, 96, 624, 658], y~28, not x=724, y=78. A
+    click at the frozen constant lands right of and below the real button
+    and opens nothing: probe_click reports "nouvelles=0 remappees=0
+    popovers=0" every time, exactly cmd_hamburger's POSITIVE CONTROL
+    FAILED symptom. Also confirmed in CI, which builds its own binary
+    fresh from this branch's source (not the published Release tag) --
+    the derived click opens the real menu there too.
 
     Method: measure the header's own vertical extent first
     (_measure_header_height), then scan that band (y in [0, header_bottom])
