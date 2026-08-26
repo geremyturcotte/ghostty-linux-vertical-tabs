@@ -1274,6 +1274,108 @@ def _merge_sidebar_row_bands(groups, tol=2):
     return [list(g) for g in groups], None
 
 
+def cmd_row_band_merge_regression():
+    """Proves _merge_sidebar_row_bands does something, in CI, with no X
+    server and no binary: it is a pure function over a list of [y0, y1]
+    spans, so unlike every other mode in this file it needs neither.
+
+    Committed CI going green on this branch is NOT evidence the row-merge
+    fix works -- it was ALSO green before this fix existed (same
+    build-test-parity job, same --menu step, unrelated positive/negative
+    controls; --menu's own scene on the CI xvfb window never happened to
+    hit the header-band case this fix targets). A prose comment describing
+    two local runs is not a measurement either -- it goes stale the moment
+    someone touches the period derivation and nothing re-checks it. This
+    is the missing fourth thing: a committed control that FAILS on the
+    pre-fix behaviour and PASSES on the fix, both printed in the same run,
+    on the exact sequence this file's docstrings and PR history cite.
+
+    Three cases, all real measured band sequences (not invented numbers):
+
+    1. The 1-tab false-negative sequence itself -- raw bands [[88, 98],
+       [126, 140], [146, 155]], centers 93.0/133.0/150.5, heights
+       11/15/10 -- captured from a live run against the published
+       v1.3.1-sidebar.3 binary (sha256 63caaf67...5a2ab), cwd=repository
+       root, Xephyr :2, 800x600, one tab. WITHOUT reunion (centers taken
+       straight off the raw bands, exactly what the pre-fix
+       measure_row_geometry did), row1_y is required to land at 93 --
+       INSIDE the header's own band [88, 98] and OUTSIDE the real row's
+       [126, 155] -- reproducing the false negative itself; if it doesn't,
+       this control has stopped testing what it claims to and FAILS. WITH
+       reunion, row1_y is required to land inside [126, 155] and the
+       header must be dropped as [88, 98], not folded into row 1.
+
+    2. A single-band case (no header to drop, nothing to merge): [[80,
+       87]] must come back unchanged, proving the len(groups) < 2
+       short-circuit doesn't eat a lone real row.
+
+    3. The period-1 case borne 2 promises but nothing else here checks:
+       three close-button bands, no header, all the same height -- real
+       measured [[80, 87], [136, 143], [192, 199]] (heights 8/8/8, from a
+       --drag-reorder run against the local dev build) -- must come back
+       as three separate, UNMERGED rows. Pairing bands two-by-two
+       unconditionally (rejected in this function's own docstring) would
+       instead collapse this into 1.5 rows; a period fixed at 2 would
+       silently do the same thing here since len(groups)=3 doesn't divide
+       evenly and would fall through wrong. Only a true derived period of
+       1 gets this case right."""
+    ok = True
+
+    def check(name, got, want, describe=str):
+        nonlocal ok
+        passed = got == want
+        ok = ok and passed
+        log(f"row-band-merge-regression: {name}: got={describe(got)} "
+            f"want={describe(want)} {'PASS' if passed else 'FAIL'}")
+        return passed
+
+    # Case 1: the real 1-tab false-negative sequence.
+    raw = [[88, 98], [126, 140], [146, 155]]
+    naive_centers = [(g0 + g1) / 2 for g0, g1 in raw]
+    naive_row1_y = naive_centers[0]
+    log(f"row-band-merge-regression: case1 WITHOUT reunion: centers={naive_centers} "
+        f"row1_y={naive_row1_y}")
+    check("case1 WITHOUT reunion reproduces the false negative "
+          "(row1_y lands on the header, not the row)",
+          (naive_row1_y == 93.0 and not (126 <= naive_row1_y <= 155)), True)
+
+    spans, header = _merge_sidebar_row_bands(raw)
+    fixed_row1_y = (spans[0][0] + spans[0][1]) / 2 if spans else None
+    log(f"row-band-merge-regression: case1 WITH reunion: spans={spans} header={header} "
+        f"row1_y={fixed_row1_y}")
+    check("case1 WITH reunion drops the header", header, [88, 98])
+    check("case1 WITH reunion yields exactly 1 row", len(spans), 1)
+    check("case1 WITH reunion's row1_y lands inside the real row's span",
+          (fixed_row1_y is not None and 126 <= fixed_row1_y <= 155), True)
+
+    # Case 2: a single band, nothing to merge, nothing to drop.
+    single = [[80, 87]]
+    spans2, header2 = _merge_sidebar_row_bands(single)
+    log(f"row-band-merge-regression: case2 (single band): spans={spans2} header={header2}")
+    check("case2 leaves a lone band unchanged", spans2, [[80, 87]])
+    check("case2 drops no header", header2, None)
+
+    # Case 3: three close-button bands, period 1, no header -- the
+    # "one sub-band already is one row" case borne 2 has to also get
+    # right, not just the "two sub-bands make one row" case above.
+    closebtn = [[80, 87], [136, 143], [192, 199]]
+    spans3, header3 = _merge_sidebar_row_bands(closebtn)
+    log(f"row-band-merge-regression: case3 (period-1 close-button bands): "
+        f"spans={spans3} header={header3}")
+    check("case3 keeps 3 separate rows (period correctly derived as 1, not paired 2-by-2)",
+          spans3, closebtn)
+    check("case3 drops no header", header3, None)
+
+    if not ok:
+        log("FAIL — _merge_sidebar_row_bands did not reproduce the pre-fix false negative "
+            "and/or the post-fix correction on the real measured sequences")
+        return 1
+    log("PASS — WITHOUT reunion reproduces the header false-negative on the real 1-tab "
+        "sequence; WITH reunion fixes it, leaves a lone band alone, and correctly derives "
+        "period 1 (not a fixed pairing) on the close-button sequence")
+    return 0
+
+
 def _detect_row_bands(img, x_range, y_range, thresh=150):
     """Groups of consecutive scanlines within y_range that have at least
     one bright (>thresh in every channel) pixel inside x_range, returned as
@@ -2985,6 +3087,9 @@ def main():
     ap.add_argument("--sidebar-column-regression", action="store_true", dest="sidebar_column_regression",
                      help="_measure_sidebar_column vs 4 self-generated stand-ins for the "
                           "majordome's reference captures (no X server needed)")
+    ap.add_argument("--row-band-merge-regression", action="store_true", dest="row_band_merge_regression",
+                     help="_merge_sidebar_row_bands vs the real measured 1-tab false-negative "
+                          "sequence, WITHOUT and WITH reunion in the same run (no X server needed)")
     args = ap.parse_args()
 
     if args.hamburger:
@@ -3007,6 +3112,8 @@ def main():
         return cmd_section_header()
     if args.sidebar_column_regression:
         return cmd_sidebar_column_regression()
+    if args.row_band_merge_regression:
+        return cmd_row_band_merge_regression()
 
     ap.print_help()
     return 1

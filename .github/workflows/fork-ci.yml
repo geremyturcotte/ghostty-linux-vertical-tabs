@@ -298,6 +298,28 @@ jobs:
       # rather than guess, and scripts/acceptance-abstentions.txt is the
       # record of where that is currently expected. The gate above still
       # applies to any mode that IS listed there.
+      # --- row-band-merge regression: the control the fix above needed ---
+      #
+      # `--menu` going green here is NOT evidence _merge_sidebar_row_bands
+      # works: this same job, same --menu step, was ALSO green before that
+      # function existed -- --menu's own scene on this xvfb window never
+      # happened to hit the header-band case the fix targets, so CI could
+      # not distinguish the repaired detector from the broken one. A prose
+      # comment describing two local runs is not a measurement either: it
+      # goes stale the moment someone touches the period derivation and
+      # nothing re-checks it.
+      #
+      # cmd_row_band_merge_regression is a pure-function control: no X
+      # server, no binary, no xvfb-run wrapper. It replays the real 1-tab
+      # false-negative band sequence WITHOUT reunion (must reproduce the
+      # false negative -- row1_y on the header) and WITH reunion (must fix
+      # it) in the same run, plus a single-band case and the period-1
+      # close-button case borne 2 promises. It FAILS if reunion stops
+      # fixing case 1, or if the pre-fix simulation stops reproducing the
+      # bug it's meant to prove exists.
+      - name: row-band-merge regression (pure function, no X server)
+        run: python3 scripts/acceptance-harness.py --row-band-merge-regression
+
       - name: menu (row context menu, with positive+negative controls)
         run: >-
           xvfb-run --auto-servernum --
